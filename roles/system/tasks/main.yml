@@ -1,4 +1,9 @@
 ---
+- name: Обновить кэш пакетов и установить обновления системы
+  ansible.builtin.apt:
+    update_cache: true
+    upgrade: safe
+
 - name: Установить базовые пакеты hardening и эксплуатации
   ansible.builtin.apt:
     name: "{{ xui_system_packages }}"
