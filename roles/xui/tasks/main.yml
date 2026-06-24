@@ -37,7 +37,7 @@
 
 - name: Скачать архив релиза 3x-ui
   ansible.builtin.get_url:
-    url: "https://github.com/MHSanaei/3x-ui/releases/download/{{ xui_version }}/x-ui-linux-{{ xui_release_arch }}.tar.gz"
+    url: "https://github.com/MHSanaei/3x-ui/releases/download/v{{ xui_expected_version }}/x-ui-linux-{{ xui_release_arch }}.tar.gz"
     dest: "/tmp/x-ui-linux-{{ xui_release_arch }}.tar.gz"
     mode: "0644"
   when: xui_current_version.rc != 0 or xui_expected_version not in xui_current_version.stdout
