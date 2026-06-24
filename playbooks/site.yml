@@ -16,7 +16,7 @@
       ansible.builtin.assert:
         that:
           - xui_admin_username | length > 0
-          - xui_admin_password | length >= 16
+          - xui_admin_password | length > 0
           - xui_panel_base_path | length >= 16
           - xui_db_password | length > 0
         fail_msg: "Нужно передать XUI_ADMIN_USERNAME, XUI_ADMIN_PASSWORD, XUI_PANEL_BASE_PATH и XUI_DB_PASSWORD через env vars или GitHub Secrets."

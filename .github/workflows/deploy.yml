@@ -53,6 +53,10 @@ jobs:
           DEPLOY_MODE: ${{ github.event.inputs.deploy_mode }}
           XUI_VERSION: ${{ github.event.inputs.xui_version }}
         run: |
+          PLAYBOOK_TAGS=""
+          [ "$DEPLOY_MODE" = "update" ] && PLAYBOOK_TAGS="--tags update"
+          # full → без --tags: запускает весь playbook (apt + все роли + post_tasks)
+          # update → --tags update: роли обновления
           ansible-playbook playbooks/site.yml \
-            --tags "$DEPLOY_MODE" \
+            $PLAYBOOK_TAGS \
             ${XUI_VERSION:+-e xui_version="$XUI_VERSION"}

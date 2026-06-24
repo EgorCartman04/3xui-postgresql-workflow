@@ -11,7 +11,7 @@ controller_ssh_public_key: "{{ lookup('file', controller_ssh_public_key_file, er
 
 xui_server_ip: "2.26.230.90"
 xui_domain: "adv.randomain.space"
-xui_version: "v3.3.1"
+xui_version: "v3.4.0"
 xui_force_downgrade: false
 xui_install_dir: "/usr/local/x-ui"
 xui_service_name: "x-ui"
