@@ -26,7 +26,7 @@ jobs:
       - name: Setup SSH key
         run: |
           mkdir -p .secrets/ssh
-          echo "${{ secrets.ANSIBLE_DEPLOY_KEY_B64 }}" | base64 -d > .secrets/ssh/ansible_deploy_key
+          echo "${{ secrets.ANSIBLE_SSH_KEY_B64 }}" | base64 -d > .secrets/ssh/ansible_deploy_key
           chmod 600 .secrets/ssh/ansible_deploy_key
           ssh-keygen -lf .secrets/ssh/ansible_deploy_key
 
