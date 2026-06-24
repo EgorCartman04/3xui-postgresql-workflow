@@ -20,12 +20,10 @@ xui_limit_nofile: 512000
 # PostgreSQL
 xui_db_type: "postgres"
 xui_db_host: "127.0.0.1"
-xui_db_port: 5433
+xui_db_port: 5432
 xui_db_name: "xui"
 xui_db_user: "xui"
 xui_db_password: "{{ lookup('env', 'XUI_DB_PASSWORD') }}"
-xui_db_path: "/etc/x-ui/x-ui.db"
-
 xui_admin_username: "{{ lookup('env', 'XUI_ADMIN_USERNAME') }}"
 xui_admin_password: "{{ lookup('env', 'XUI_ADMIN_PASSWORD') }}"
 xui_panel_base_path: "{{ lookup('env', 'XUI_PANEL_BASE_PATH') }}"
@@ -80,7 +78,7 @@ xui_manager_config_path: "{{ xui_manager_config_dir }}/config.json"
 xui_manager_state_path: "{{ xui_manager_state_dir }}/state.json"
 xui_manager_sni_list_path: "{{ xui_manager_config_dir }}/reality-sni.txt"
 xui_manager_seed_sni_file: "{{ inventory_dir }}/../../data/sni/reality-sni.txt"
-xui_manager_fail2ban_db_path: "/var/lib/fail2ban/fail2ban.sqlite3"
+xui_manager_fail2ban_db_path: "/var/lib/fail2ban/fail2ban.sqlite3"  # fail2ban родная БД — sqlite3
 xui_manager_fail2ban_override_path: "/etc/fail2ban/jail.d/zz-3x-ui-manager.local"
 xui_manager_service_name: "3x-ui-manager"
 xui_manager_rotation_service_name: "3x-ui-manager-rotation"
@@ -112,7 +110,6 @@ xui_system_packages:
   - openssl
   - python3-bcrypt
   - socat
-  - sqlite3
   - ufw
   - unattended-upgrades
   - apt-listchanges

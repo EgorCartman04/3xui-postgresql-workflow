@@ -37,7 +37,11 @@
     content: |
       {{ {
         'created_at': ansible_date_time.iso8601,
-        'xui_db_path': xui_db_path,
+        'xui_db_type': xui_db_type,
+        'xui_db_host': xui_db_host,
+        'xui_db_port': xui_db_port,
+        'xui_db_name': xui_db_name,
+        'xui_db_user': xui_db_user,
         'xui_manager_config_path': xui_manager_config_path,
         'xui_manager_state_path': xui_manager_state_path,
         'xui_manager_sni_list_path': xui_manager_sni_list_path
@@ -46,14 +50,15 @@
     group: root
     mode: "0600"
 
-- name: Сохранить backup x-ui.db перед обновлением менеджера SNI
-  ansible.builtin.copy:
-    src: "{{ xui_db_path }}"
-    dest: "{{ xui_manager_rollout_backup_dir }}/x-ui.db"
-    remote_src: true
-    owner: root
-    group: root
-    mode: "0600"
+- name: Сохранить pg_dump базы 3x-ui перед обновлением менеджера SNI
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export PGPASSWORD="{{ xui_db_password }}"
+    pg_dump -U "{{ xui_db_user }}" -d "{{ xui_db_name }}" -h "{{ xui_db_host }}" -p "{{ xui_db_port }}" \
+      -Fc -f "{{ xui_manager_rollout_backup_dir }}/x-ui-pg-dump.custom"
+  args:
+    executable: /bin/bash
+  changed_when: false
   failed_when: false
 
 - name: Проверить наличие runtime-артефактов менеджера для rollout backup

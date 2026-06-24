@@ -1,7 +1,12 @@
 {
   "listen_host": {{ xui_manager_listen_ip | to_json }},
   "listen_port": {{ xui_manager_port }},
-  "xui_db_path": {{ xui_db_path | to_json }},
+  "xui_db_type": {{ xui_db_type | to_json }},
+  "xui_db_host": {{ xui_db_host | to_json }},
+  "xui_db_port": {{ xui_db_port }},
+  "xui_db_name": {{ xui_db_name | to_json }},
+  "xui_db_user": {{ xui_db_user | to_json }},
+  "xui_db_password": {{ xui_db_password | to_json }},
   "fail2ban_db_path": {{ xui_manager_fail2ban_db_path | to_json }},
   "fail2ban_override_path": {{ xui_manager_fail2ban_override_path | to_json }},
   "rotation_timer_unit": {{ xui_manager_rotation_timer_name | to_json }},

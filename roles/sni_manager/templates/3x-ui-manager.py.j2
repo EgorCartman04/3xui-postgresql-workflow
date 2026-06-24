@@ -6,9 +6,6 @@ import hmac
 import json
 import os
 import re
-import shutil
-import sqlite3
-import ssl
 import subprocess
 import sys
 import threading
@@ -25,6 +22,35 @@ try:
     CRYPT_AVAILABLE = True
 except ImportError:
     CRYPT_AVAILABLE = False
+
+
+def pg_connect(config):
+    """Return psycopg2 connection with RealDictCursor for dict-like row access."""
+    conn = psycopg2.connect(
+        dbname=config["xui_db_name"],
+        user=config["xui_db_user"],
+        password=config["xui_db_password"],
+        host=config["xui_db_host"],
+        port=config["xui_db_port"],
+        cursor_factory=psycopg2.extras.RealDictCursor,
+    )
+    conn.autocommit = False
+    return conn
+
+
+def pg_execute(conn, sql, params=None):
+    """Execute SQL and return cursor with results."""
+    cur = conn.cursor()
+    cur.execute(sql, params or ())
+    return cur
+
+
+def pg_commit(conn):
+    conn.commit()
+
+
+def pg_close(conn):
+    conn.close()
 
 
 DOMAIN_RE = re.compile(r"^[A-Za-z0-9.-]+$")
@@ -162,8 +188,8 @@ def find_entry_index(entries, candidate):
     return -1
 
 
-def run_command(args, check=True):
-    completed = subprocess.run(args, capture_output=True, text=True)
+def run_command(args, check=True, env=None):
+    completed = subprocess.run(args, capture_output=True, text=True, env=env)
     if check and completed.returncode != 0:
         raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "command failed")
     return completed
@@ -196,13 +222,20 @@ def set_timer_state(config, enabled):
 
 
 def backup_db(config):
-    source = Path(config["xui_db_path"])
-    if not source.exists():
-        raise RuntimeError(f"База 3x-ui не найдена: {source}")
     backup_dir = Path(config["state_path"]).parent / "db-backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
-    destination = backup_dir / f"x-ui-{int(time.time())}.db"
-    shutil.copy2(source, destination)
+    destination = backup_dir / f"x-ui-{int(time.time())}.dump"
+    env = os.environ.copy()
+    env["PGPASSWORD"] = config["xui_db_password"]
+    run_command([
+        "pg_dump",
+        "-U", config["xui_db_user"],
+        "-d", config["xui_db_name"],
+        "-h", config["xui_db_host"],
+        "-p", str(config["xui_db_port"]),
+        "-Fc",
+        "-f", str(destination),
+    ], env=env)
     return str(destination)
 
 
@@ -247,23 +280,23 @@ def validate_rotation_slots(config):
     return window_size, slot_ports
 
 
-def prune_extra_slot_inbounds(connection, config):
+def prune_extra_slot_inbounds(conn, config):
     window_size, slot_ports = validate_rotation_slots(config)
     desired_ports = set(slot_ports[:window_size])
     extra_ports = set(slot_ports) - desired_ports
     if not extra_ports:
         return []
 
-    managed = discover_managed_inbounds(connection)
+    managed = discover_managed_inbounds(conn)
     deleted_ports = []
     for inbound in managed:
         port = inbound.get("port")
         if port not in extra_ports:
             continue
-        connection.execute("DELETE FROM inbounds WHERE id = ?", (inbound["id"],))
+        pg_execute(conn, "DELETE FROM inbounds WHERE id = %s", (inbound["id"],))
         deleted_ports.append(port)
     if deleted_ports:
-        connection.commit()
+        pg_commit(conn)
     return deleted_ports
 
 
@@ -449,17 +482,25 @@ def merge_server_names(window_entries):
     return merged
 
 
-def discover_managed_inbounds(connection):
+def discover_managed_inbounds(conn):
     managed = []
-    rows = connection.execute(
+    cur = pg_execute(conn,
         "SELECT id, remark, enable, port, tag, stream_settings, settings FROM inbounds WHERE protocol = 'vless'"
-    ).fetchall()
-    for inbound_id, remark, enable, port, tag, stream_raw, settings_raw in rows:
+    )
+    rows = cur.fetchall()
+    for row in rows:
+        inbound_id = row["id"]
+        remark = row["remark"]
+        enable = row["enable"]
+        port = row["port"]
+        tag = row["tag"]
+        stream_raw = row["stream_settings"]
+        settings_raw = row["settings"]
         if not stream_raw or not settings_raw:
             continue
         try:
-            stream = json.loads(stream_raw)
-            settings = json.loads(settings_raw)
+            stream = json.loads(stream_raw) if isinstance(stream_raw, str) else stream_raw
+            settings = json.loads(settings_raw) if isinstance(settings_raw, str) else settings_raw
         except json.JSONDecodeError:
             continue
         if stream.get("security") != "reality":
@@ -483,23 +524,24 @@ def discover_managed_inbounds(connection):
     return managed
 
 
-def load_inbound_row(connection, inbound_id):
-    row = connection.execute(
-        "SELECT * FROM inbounds WHERE id = ?",
-        (inbound_id,),
-    ).fetchone()
+def load_inbound_row(conn, inbound_id):
+    cur = pg_execute(conn, "SELECT * FROM inbounds WHERE id = %s", (inbound_id,))
+    row = cur.fetchone()
     if row is None:
         raise RuntimeError(f"Inbound id={inbound_id} не найден")
     return row
 
 
-def get_table_columns(connection, table_name):
-    rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-    return {row[1] for row in rows}
+def get_table_columns(conn, table_name):
+    cur = pg_execute(conn,
+        "SELECT column_name FROM information_schema.columns WHERE table_name = %s",
+        (table_name,)
+    )
+    return {row["column_name"] for row in cur.fetchall()}
 
 
-def clone_slot_inbound(connection, base_row, port, remark, tag):
-    columns = get_table_columns(connection, "inbounds")
+def clone_slot_inbound(conn, base_row, port, remark, tag):
+    columns = get_table_columns(conn, "inbounds")
     base_values = dict(base_row)
     values_by_column = {
         "user_id": base_values.get("user_id", 0),
@@ -521,23 +563,23 @@ def clone_slot_inbound(connection, base_row, port, remark, tag):
         "sniffing": base_values.get("sniffing", ""),
     }
     insert_columns = [name for name in values_by_column if name in columns]
-    placeholders = ", ".join("?" for _ in insert_columns)
-    sql = f"INSERT INTO inbounds ({', '.join(insert_columns)}) VALUES ({placeholders})"
-    connection.execute(sql, tuple(values_by_column[name] for name in insert_columns))
-    return connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+    placeholders = ", ".join("%s" for _ in insert_columns)
+    sql = f"INSERT INTO inbounds ({', '.join(insert_columns)}) VALUES ({placeholders}) RETURNING id"
+    cur = pg_execute(conn, sql, tuple(values_by_column[name] for name in insert_columns))
+    return cur.fetchone()["id"]
 
 
-def ensure_slot_inbounds(connection, config):
+def ensure_slot_inbounds(conn, config):
     window_size, slot_ports = validate_rotation_slots(config)
     slot_ports = slot_ports[:window_size]
-    prune_extra_slot_inbounds(connection, config)
-    managed = discover_managed_inbounds(connection)
+    prune_extra_slot_inbounds(conn, config)
+    managed = discover_managed_inbounds(conn)
     if not managed:
         raise RuntimeError("Не найдены inbound-ы VLESS+REALITY+Vision для управления")
 
     managed_by_port = {item["port"]: item for item in managed}
     base_inbound = managed_by_port.get(slot_ports[0]) or managed[0]
-    base_row = load_inbound_row(connection, base_inbound["id"])
+    base_row = load_inbound_row(conn, base_inbound["id"])
     base_remark = slot_base_remark(base_row["remark"])
     auto_provision = bool((config.get("slots") or {}).get("auto_provision", False))
 
@@ -550,7 +592,7 @@ def ensure_slot_inbounds(connection, config):
         if current is None:
             if not auto_provision:
                 raise RuntimeError(f"Не найден slot inbound для порта {port}, а auto_provision отключён")
-            inbound_id = clone_slot_inbound(connection, base_row, port, desired_remark, desired_tag)
+            inbound_id = clone_slot_inbound(conn, base_row, port, desired_remark, desired_tag)
             current = {
                 "id": inbound_id,
                 "remark": desired_remark,
@@ -564,17 +606,17 @@ def ensure_slot_inbounds(connection, config):
         updates = []
         params = []
         if current.get("remark") != desired_remark:
-            updates.append("remark = ?")
+            updates.append("remark = %s")
             params.append(desired_remark)
         if current.get("tag") != desired_tag:
-            updates.append("tag = ?")
+            updates.append("tag = %s")
             params.append(desired_tag)
         if current.get("port") != port:
-            updates.append("port = ?")
+            updates.append("port = %s")
             params.append(port)
         if updates:
             params.append(current["id"])
-            connection.execute(f"UPDATE inbounds SET {', '.join(updates)} WHERE id = ?", params)
+            pg_execute(conn, f"UPDATE inbounds SET {', '.join(updates)} WHERE id = %s", params)
 
         slot_inbounds.append({
             "id": current["id"],
@@ -583,38 +625,41 @@ def ensure_slot_inbounds(connection, config):
             "tag": desired_tag,
         })
 
+    pg_commit(conn)
     return slot_inbounds
 
 
-def apply_generations_to_slot_inbounds(connection, config, slot_inbounds, active_generations):
+def apply_generations_to_slot_inbounds(conn, config, slot_inbounds, active_generations):
     backup_path = backup_db(config)
     desired_ports = {slot_inbound["port"] for slot_inbound in slot_inbounds}
-    stale_managed_inbounds = [item for item in discover_managed_inbounds(connection) if item["port"] not in desired_ports]
+    stale_managed_inbounds = [item for item in discover_managed_inbounds(conn) if item["port"] not in desired_ports]
     for stale_inbound in stale_managed_inbounds:
-        connection.execute("DELETE FROM inbounds WHERE id = ?", (stale_inbound["id"],))
+        pg_execute(conn, "DELETE FROM inbounds WHERE id = %s", (stale_inbound["id"],))
     active_by_port = {generation["slot_port"]: generation for generation in active_generations}
     applied_inbounds = []
 
     for slot_inbound in slot_inbounds:
         generation = active_by_port.get(slot_inbound["port"])
         if generation is None:
-            connection.execute(
-                "UPDATE inbounds SET enable = 0 WHERE id = ?",
+            pg_execute(conn,
+                "UPDATE inbounds SET enable = false WHERE id = %s",
                 (slot_inbound["id"],),
             )
             continue
 
-        row = connection.execute(
-            "SELECT stream_settings FROM inbounds WHERE id = ?",
+        cur = pg_execute(conn,
+            "SELECT stream_settings FROM inbounds WHERE id = %s",
             (slot_inbound["id"],),
-        ).fetchone()
-        stream = json.loads(row["stream_settings"])
+        )
+        row = cur.fetchone()
+        stream_raw = row["stream_settings"]
+        stream = json.loads(stream_raw) if isinstance(stream_raw, str) else stream_raw
         reality = stream.get("realitySettings") or {}
         reality["target"] = generation["entry"]["target"]
         reality["serverNames"] = generation["entry"]["server_names"]
         stream["realitySettings"] = reality
-        connection.execute(
-            "UPDATE inbounds SET stream_settings = ?, enable = 1 WHERE id = ?",
+        pg_execute(conn,
+            "UPDATE inbounds SET stream_settings = %s, enable = true WHERE id = %s",
             (json.dumps(stream, ensure_ascii=False, indent=2), slot_inbound["id"]),
         )
         applied_inbounds.append({
@@ -629,7 +674,7 @@ def apply_generations_to_slot_inbounds(connection, config, slot_inbounds, active
             "activated_at": generation["activated_at"],
         })
 
-    connection.commit()
+    pg_commit(conn)
     run_command(["systemctl", "restart", config["xui_service_unit"]])
     return backup_path, applied_inbounds
 
@@ -662,12 +707,11 @@ def persist_generation_state(config, state, active_generations, active_index, re
 
 def prepare_generation_context(config, entries):
     state = load_state(config)
-    connection = sqlite3.connect(config["xui_db_path"])
-    connection.row_factory = sqlite3.Row
-    slot_inbounds = ensure_slot_inbounds(connection, config)
-    managed_inbounds = discover_managed_inbounds(connection)
+    conn = pg_connect(config)
+    slot_inbounds = ensure_slot_inbounds(conn, config)
+    managed_inbounds = discover_managed_inbounds(conn)
     active_generations, next_generation_id = active_generations_from_state(state, entries, slot_inbounds, managed_inbounds)
-    return connection, state, slot_inbounds, active_generations, next_generation_id
+    return conn, state, slot_inbounds, active_generations, next_generation_id
 
 
 def reconcile_sni_list(config, entries):
@@ -870,23 +914,24 @@ def read_text(path):
         return handle.read()
 
 
-def verify_xui_user_credentials(xui_db_path, username, password):
+def verify_xui_user_credentials(config, username, password):
     if not username or not password:
         return False
 
-    connection = sqlite3.connect(xui_db_path)
+    conn = pg_connect(config)
     try:
-        row = connection.execute(
-            "SELECT password FROM users WHERE username = ? LIMIT 1",
+        cur = pg_execute(conn,
+            "SELECT password FROM users WHERE username = %s LIMIT 1",
             (username,),
-        ).fetchone()
+        )
+        row = cur.fetchone()
     finally:
-        connection.close()
+        pg_close(conn)
 
     if not row:
         return False
 
-    stored_hash = str(row[0] or "").strip()
+    stored_hash = str(row["password"] or "").strip()
     if not stored_hash:
         return False
 
@@ -930,11 +975,11 @@ class App:
         state = load_state(config)
         current_entries = read_sni_entries(config["sni_list_path"])
         inbounds = []
-        connection = sqlite3.connect(config["xui_db_path"])
+        conn = pg_connect(config)
         try:
-            inbounds = discover_managed_inbounds(connection)
+            inbounds = discover_managed_inbounds(conn)
         finally:
-            connection.close()
+            pg_close(conn)
         bans = load_fail2ban_bans(config)
         fail2ban = get_fail2ban_settings()
         counts = {}
@@ -1021,7 +1066,7 @@ class App:
             return False
 
         username, password = decoded.split(":", 1)
-        return verify_xui_user_credentials(self.config["xui_db_path"], username, password)
+        return verify_xui_user_credentials(self.config, username, password)
 
     def auth_realm(self):
         auth_cfg = self.config.get("auth") or {}
@@ -1411,15 +1456,14 @@ def serve(config_path):
     try:
         entries = read_sni_entries(config["sni_list_path"])
         with ROTATION_LOCK:
-            connection = sqlite3.connect(config["xui_db_path"])
-            connection.row_factory = sqlite3.Row
+            conn = pg_connect(config)
             try:
-                deleted = prune_extra_slot_inbounds(connection, config)
+                deleted = prune_extra_slot_inbounds(conn, config)
                 if deleted:
                     run_command(["systemctl", "restart", config["xui_service_unit"]])
                     append_log(config["runtime_log_path"], f"startup prune: deleted slot inbounds on ports {deleted}")
             finally:
-                connection.close()
+                pg_close(conn)
     except Exception as exc:
         append_log(config["runtime_log_path"], f"startup prune skipped: {exc}")
     handler = type("AppHandler", (Handler,), {})

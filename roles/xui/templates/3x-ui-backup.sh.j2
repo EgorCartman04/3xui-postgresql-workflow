@@ -32,7 +32,7 @@ done
 # Always include the database dump
 sources+=("${tmp_dir}/x-ui-db.dump")
 
-if [[ "${sources_count}" -eq 0 && $((sources_count + 1)) -le 1 ]]; then
+if [[ "${sources_count}" -eq 0 ]]; then
   exit 0
 fi
 

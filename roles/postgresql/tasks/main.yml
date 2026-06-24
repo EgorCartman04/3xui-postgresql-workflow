@@ -1,4 +1,18 @@
 ---
+- name: Остановить и удалить pgvector Docker-контейнер (если запущен)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if docker ps -a --filter ancestor=pgvector/pgvector:pg16 --format '{{"{{"}}.ID{{"}}"}}' | grep -q . 2>/dev/null; then
+      docker stop $(docker ps -a --filter ancestor=pgvector/pgvector:pg16 -q) 2>/dev/null || true
+      docker rm $(docker ps -a --filter ancestor=pgvector/pgvector:pg16 -q) 2>/dev/null || true
+      echo "pgvector container removed"
+    else
+      echo "pgvector container not found"
+    fi
+  changed_when: "'pgvector container removed' in cleanup_pgvector.stdout"
+  failed_when: false
+  register: cleanup_pgvector
+
 - name: Установить PostgreSQL (включая postgresql-common)
   ansible.builtin.apt:
     name:

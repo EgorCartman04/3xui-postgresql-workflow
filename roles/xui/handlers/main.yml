@@ -19,12 +19,6 @@
     state: restarted
     enabled: true
 
-- name: Restart 3x-ui port sync path
-  ansible.builtin.systemd:
-    name: 3x-ui-port-sync.path
-    state: restarted
-    enabled: true
-
 - name: Restart 3x-ui port sync timer
   ansible.builtin.systemd:
     name: 3x-ui-port-sync.timer

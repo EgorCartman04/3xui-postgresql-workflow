@@ -213,21 +213,8 @@
     mode: "0644"
   notify:
     - Reload systemd
-    - Restart 3x-ui port sync path
     - Restart 3x-ui port sync timer
     - Run 3x-ui port sync
-  tags: [port-sync]
-
-- name: Установить systemd path для отслеживания изменений базы 3x-ui
-  ansible.builtin.template:
-    src: 3x-ui-port-sync.path.j2
-    dest: /etc/systemd/system/3x-ui-port-sync.path
-    owner: root
-    group: root
-    mode: "0644"
-  notify:
-    - Reload systemd
-    - Restart 3x-ui port sync path
   tags: [port-sync]
 
 - name: Установить systemd timer для периодической синхронизации портов 3x-ui
@@ -240,14 +227,6 @@
   notify:
     - Reload systemd
     - Restart 3x-ui port sync timer
-  tags: [port-sync]
-
-- name: Включить и запустить path-мониторинг портов 3x-ui
-  ansible.builtin.systemd:
-    name: 3x-ui-port-sync.path
-    enabled: true
-    state: started
-    daemon_reload: true
   tags: [port-sync]
 
 - name: Включить и запустить timer синхронизации портов 3x-ui

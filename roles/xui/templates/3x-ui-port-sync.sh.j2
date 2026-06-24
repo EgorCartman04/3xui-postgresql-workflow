@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-db_path="{{ xui_db_path }}"
+PG_HOST="{{ xui_db_host }}"
+PG_PORT="{{ xui_db_port }}"
+PG_USER="{{ xui_db_user }}"
+PG_DB="{{ xui_db_name }}"
+export PGPASSWORD="{{ xui_db_password }}"
+
 state_dir="{{ xui_port_sync_state_dir }}"
 state_file="${state_dir}/managed-rules.txt"
 tmp_file="$(mktemp)"
@@ -23,12 +28,12 @@ exec 9>"${lock_file}"
 # чтобы второй запуск не завершался мгновенно и не создавал ложные провалы проверок.
 flock -w {{ xui_port_sync_lock_wait_seconds | default(15) }} 9 || exit 0
 
-if [[ ! -f "${db_path}" ]]; then
-  echo "База 3x-ui не найдена: ${db_path}" >&2
-  exit 0
-fi
+psql_cmd() {
+  psql -U "${PG_USER}" -d "${PG_DB}" -h "${PG_HOST}" -p "${PG_PORT}" -tA "$@"
+}
 
-supports_transport() {
+{
+{% for port in xui_firewall_allowed_tcp_ports %}
   local protocol="$1"
   local stream_settings="$2"
   local settings="$3"
@@ -87,14 +92,12 @@ supports_transport() {
 {% endif %}
 {% endfor %}
 
-  sub_port_db="$(sqlite3 -readonly "${db_path}" \
-    "SELECT value FROM settings WHERE key='subPort' LIMIT 1;" 2>/dev/null || true)"
+  sub_port_db="$(psql_cmd -c "SELECT value FROM settings WHERE key='subPort' LIMIT 1;" 2>/dev/null || true)"
   if [[ -n "${sub_port_db}" && "${sub_port_db}" =~ ^[0-9]+$ ]]; then
     printf '%s/tcp\n' "${sub_port_db}"
   fi
 
-  sqlite3 -readonly -tabs "${db_path}" \
-    "SELECT port, protocol, COALESCE(json(NULLIF(stream_settings, '')), ''), COALESCE(json(NULLIF(settings, '')), '') FROM inbounds WHERE enable = 1;" | \
+  psql_cmd -c "SELECT port, protocol, COALESCE(stream_settings::text, ''), COALESCE(settings::text, '') FROM inbounds WHERE enable = true;" | \
   while IFS=$'\t' read -r port protocol stream_settings settings; do
     [[ -n "${port}" ]] || continue
     while IFS= read -r transport; do
