@@ -171,6 +171,39 @@
 # pg_hba, пароль и reload PostgreSQL уже обработаны ролью postgresql
 # с синхронными flush_handlers (гарантированный порядок: pg_hba → reload → ALTER USER → reload).
 
+- name: "Диагностика: проверить совпадение пароля x-ui.env с PostgreSQL"
+  vars:
+    xui_db_user_j2: "{{ xui_db_user }}"
+    xui_db_name_j2: "{{ xui_db_name }}"
+    xui_db_host_j2: "{{ xui_db_host }}"
+    xui_db_port_j2: "{{ xui_db_port }}"
+    xui_db_password_j2: "{{ xui_db_password }}"
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -euo pipefail
+      echo "=== Пароль из /etc/default/x-ui (DSN) ==="
+      DSN_PASS="$(grep -oP 'password=\K[^\s]+' /etc/default/x-ui || echo 'NOT_FOUND')"
+      printf 'DSN_PASS length: %s\n' "${#DSN_PASS}"
+      echo "=== Пароль из Ansible ==="
+      printf 'ANSIBLE_PASS length: %s\n' '{{ xui_db_password | length }}'
+      echo "=== Прямой тест psql с паролем из DSN ==="
+      DSN_USER="$(grep -oP 'user=\K[^\s]+' /etc/default/x-ui)"
+      DSN_HOST="$(grep -oP 'host=\K[^\s]+' /etc/default/x-ui)"
+      DSN_PORT="$(grep -oP 'port=\K[^\s]+' /etc/default/x-ui)"
+      DSN_DB="$(grep -oP 'dbname=\K[^\s]+' /etc/default/x-ui)"
+      PGPASSWORD="$DSN_PASS" psql -h "$DSN_HOST" -p "$DSN_PORT" -U "$DSN_USER" -d "$DSN_DB" -tAc "SELECT 'DSN_OK';" 2>&1 || echo "DSN_FAILED"
+      echo "=== Прямой тест psql с паролем из Ansible ==="
+      PGPASSWORD="${xui_db_password_j2}" psql -h "${xui_db_host_j2}" -p "${xui_db_port_j2}" -U "${xui_db_user_j2}" -d "${xui_db_name_j2}" -tAc "SELECT 'ANSIBLE_OK';" 2>&1 || echo "ANSIBLE_FAILED"
+      echo "=== Формат пароля в pg_authid ==="
+      sudo -u postgres psql -tAc "SELECT left(rolpassword, 20) FROM pg_authid WHERE rolname='${xui_db_user_j2}';"
+  register: xui_auth_diag
+  changed_when: false
+
+- name: Вывести диагностику auth
+  ansible.builtin.debug:
+    var: xui_auth_diag.stdout_lines
+
 - name: Выполнить миграции 3x-ui (создание схемы в PostgreSQL)
   ansible.builtin.command: "{{ xui_install_dir }}/x-ui migrate"
   changed_when: false
