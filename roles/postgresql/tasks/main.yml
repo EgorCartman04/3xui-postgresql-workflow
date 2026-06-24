@@ -37,6 +37,11 @@
     current_port="$(grep -E '^\s*port\s*=' "${pg_conf}" | awk -F= '{print $2}' | tr -d ' ')"
     echo "pg_conf=${pg_conf}"
     echo "current_port=${current_port}"
+    if [[ "${current_port}" == "{{ xui_db_port }}" ]]; then
+      echo "port_ok=true"
+    else
+      echo "port_ok=false"
+    fi
   register: pg_port_check
   changed_when: false
 
@@ -46,12 +51,12 @@
     pg_conf="$(find /etc/postgresql -name postgresql.conf -path "*/main/*" | head -n 1)"
     sed -i 's/^\s*port\s*=.*/port = {{ xui_db_port }}/' "${pg_conf}"
     echo "port changed to {{ xui_db_port }}"
-  when: "'{{ xui_db_port }}' not in pg_port_check.stdout"
+  when: "'port_ok=false' in pg_port_check.stdout"
   notify: Restart postgresql
 
 - name: Применить смену порта PostgreSQL
   ansible.builtin.meta: flush_handlers
-  when: "'{{ xui_db_port }}' not in pg_port_check.stdout"
+  when: "'port_ok=false' in pg_port_check.stdout"
 
 - name: Проверить существование БД xui
   become: true
