@@ -173,28 +173,6 @@
     name: postgresql
     state: reloaded
 
-- name: Финальная диагностика auth (формат пароля + тест psql)
-  become: true
-  become_user: postgres
-  ansible.builtin.shell: |
-    set -euo pipefail
-    echo "--- pg_hba записи xui ---"
-    grep -i "{{ xui_db_user }}" /etc/postgresql/*/main/pg_hba.conf || echo "(нет)"
-    echo "--- Формат пароля (scram/md5) ---"
-    psql -tAc "SELECT left(rolpassword, 15) FROM pg_authid WHERE rolname='{{ xui_db_user }}';"
-    echo "--- Принудительный ALTER USER (с scram) ---"
-    psql -c "ALTER USER \"{{ xui_db_user }}\" WITH PASSWORD '{{ xui_db_password }}';"
-    echo "--- Тест psql кредами из DSN ---"
-    PGPASSWORD='{{ xui_db_password }}' psql -h {{ xui_db_host }} -p {{ xui_db_port }} -U {{ xui_db_user }} -d {{ xui_db_name }} -tAc "SELECT 1 AS ok;" 2>&1 || echo "PSQL_FAIL rc=$?"
-  args:
-    executable: /bin/bash
-  register: xui_auth_diag
-  changed_when: false
-
-- name: Вывести диагностику auth
-  ansible.builtin.debug:
-    var: xui_auth_diag.stdout_lines
-
 - name: Выполнить миграции 3x-ui (создание схемы в PostgreSQL)
   ansible.builtin.command: "{{ xui_install_dir }}/x-ui migrate"
   changed_when: false
