@@ -84,7 +84,7 @@
     group: root
     mode: "0644"
   notify: Reload sysctl
-  tags: [network]
+  tags: [update, network]
 
 - name: Установить systemd unit для iperf3
   ansible.builtin.template:
