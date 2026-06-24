@@ -15,48 +15,6 @@
     state: started
     enabled: true
 
-- name: Исправить порт PostgreSQL на 5432 (PG 18 default = 5433)
-  ansible.builtin.lineinfile:
-    path: "/etc/postgresql/18/main/postgresql.conf"
-    regexp: '^#?port\s*='
-    line: 'port = 5432'
-  register: pg_port_fix
-  notify: Restart postgresql
-
-# Синхронный restart: порт должен примениться до всех остальных операций с БД.
-- name: Применить изменение порта (restart PostgreSQL)
-  ansible.builtin.meta: flush_handlers
-
-# После restart явно убедиться, что PostgreSQL жив и слушает 5432.
-# systemd restart иногда возвращает успех до фактического запуска процесса.
-- name: Убедиться, что PostgreSQL запущен и слушает порт 5432
-  ansible.builtin.wait_for:
-    port: "{{ xui_db_port }}"
-    host: "{{ xui_db_host }}"
-    state: started
-    timeout: 30
-
-- name: Диагностика порта PostgreSQL перед продолжением
-  ansible.builtin.shell: |
-    set -uo pipefail
-    echo "=== Реальный слушающий порт ==="
-    ss -tlnp | grep postgres || echo "NO_PG_LISTEN"
-    echo "=== pg_lsclusters ==="
-    pg_lsclusters 2>/dev/null || echo "NO_PG_LSCLUSTERS"
-    echo "=== port в postgresql.conf ==="
-    grep -r '^port' /etc/postgresql/18/main/postgresql.conf /etc/postgresql/18/main/conf.d/ 2>/dev/null || echo "NO_PORT_FOUND"
-    echo "=== Все include_dir ==="
-    grep 'include_dir' /etc/postgresql/18/main/postgresql.conf 2>/dev/null || echo "NO_INCLUDE_DIR"
-    echo "=== DONE ==="
-  args:
-    executable: /bin/bash
-  register: pg_port_diag
-  changed_when: false
-
-- name: Вывести диагностику порта
-  ansible.builtin.debug:
-    var: pg_port_diag.stdout_lines
-
 - name: Проверить существование БД xui
   become: true
   become_user: postgres
@@ -96,7 +54,6 @@
 
 # Сначала переключить pg_hba на scram-sha-256, чтобы последующий ALTER USER
 # захешировал пароль правильным методом (scram-sha-256, а не md5).
-# Порядок критичен: pg_hba → reload → ALTER USER → reload.
 - name: Настроить локальный доступ для пользователя xui в pg_hba.conf (scram-sha-256)
   ansible.builtin.shell: |
     set -euo pipefail
@@ -105,9 +62,7 @@
       echo "ERROR: pg_hba.conf not found"
       exit 1
     fi
-    # Удалить любые ранее добавленные строки для xui (старые md5-записи и комментарии)
     sed -i "/# 3x-ui local access/d; /^[[:space:]]*\(local\|host\)[[:space:]]\+{{ xui_db_name }}[[:space:]]\+{{ xui_db_user }}[[:space:]]/d" "${hba_file}"
-    # Добавить актуальные записи с scram-sha-256 (соответствует password_encryption по умолчанию в PG 14+)
     {
       echo "# 3x-ui local access"
       echo "local   {{ xui_db_name }}   {{ xui_db_user }}   scram-sha-256"
@@ -118,7 +73,6 @@
     executable: /bin/bash
   notify: Reload postgresql
 
-# Синхронизировать handler-ы: гарантировать, что pg_hba перечитан ДО ALTER USER.
 - name: Применить изменения pg_hba перед синхронизацией пароля
   ansible.builtin.meta: flush_handlers
 
@@ -133,7 +87,6 @@
   changed_when: true
   notify: Reload postgresql
 
-# Гарантировать, что PostgreSQL перечитал новый пароль.
 - name: Применить изменения пароля перед миграцией
   ansible.builtin.meta: flush_handlers
 

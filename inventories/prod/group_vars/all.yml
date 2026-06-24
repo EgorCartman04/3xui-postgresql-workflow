@@ -20,7 +20,7 @@ xui_limit_nofile: 512000
 # PostgreSQL
 xui_db_type: "postgres"
 xui_db_host: "127.0.0.1"
-xui_db_port: 5432
+xui_db_port: 5433
 xui_db_name: "xui"
 xui_db_user: "xui"
 xui_db_password: "{{ lookup('env', 'XUI_DB_PASSWORD') }}"
