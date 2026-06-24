@@ -31,10 +31,31 @@
 # systemd restart иногда возвращает успех до фактического запуска процесса.
 - name: Убедиться, что PostgreSQL запущен и слушает порт 5432
   ansible.builtin.wait_for:
-    port: 5432
+    port: "{{ xui_db_port }}"
     host: "{{ xui_db_host }}"
     state: started
     timeout: 30
+
+- name: Диагностика порта PostgreSQL перед продолжением
+  ansible.builtin.shell: |
+    set -uo pipefail
+    echo "=== Реальный слушающий порт ==="
+    ss -tlnp | grep postgres || echo "NO_PG_LISTEN"
+    echo "=== pg_lsclusters ==="
+    pg_lsclusters 2>/dev/null || echo "NO_PG_LSCLUSTERS"
+    echo "=== port в postgresql.conf ==="
+    grep -r '^port' /etc/postgresql/18/main/postgresql.conf /etc/postgresql/18/main/conf.d/ 2>/dev/null || echo "NO_PORT_FOUND"
+    echo "=== Все include_dir ==="
+    grep 'include_dir' /etc/postgresql/18/main/postgresql.conf 2>/dev/null || echo "NO_INCLUDE_DIR"
+    echo "=== DONE ==="
+  args:
+    executable: /bin/bash
+  register: pg_port_diag
+  changed_when: false
+
+- name: Вывести диагностику порта
+  ansible.builtin.debug:
+    var: pg_port_diag.stdout_lines
 
 - name: Проверить существование БД xui
   become: true
