@@ -1,0 +1,57 @@
+name: Diagnostic 2 - PostgreSQL instance status and start.conf
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        env:
+          ANSIBLE_DEPLOY_KEY: ${{ secrets.ANSIBLE_DEPLOY_KEY }}
+        run: |
+          mkdir -p .secrets/ssh
+          printf '%s\n' "$ANSIBLE_DEPLOY_KEY" > .secrets/ssh/ansible_deploy_key
+          chmod 600 .secrets/ssh/ansible_deploy_key
+
+      - name: Add remote host to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H 2.26.230.90 >> ~/.ssh/known_hosts
+
+      - name: Diagnostic - instance status and start.conf
+        run: |
+          ssh -o StrictHostKeyChecking=no -i .secrets/ssh/ansible_deploy_key root@2.26.230.90 'bash -s' << 'HEREDOC'
+          set -uo pipefail
+
+          echo "=== 1. start.conf ==="
+          cat /etc/postgresql/18/main/start.conf
+
+          echo ""
+          echo "=== 2. pg_ctl.conf ==="
+          cat /etc/postgresql/18/main/pg_ctl.conf
+
+          echo ""
+          echo "=== 3. Статус экземпляра 18-main ==="
+          systemctl status postgresql@18-main 2>&1 | head -20
+
+          echo ""
+          echo "=== 4. Попытка запустить экземпляр напрямую ==="
+          systemctl start postgresql@18-main 2>&1
+          sleep 2
+          systemctl status postgresql@18-main 2>&1 | head -10
+
+          echo ""
+          echo "=== 5. Слушающие порты после запуска ==="
+          ss -tlnp | grep postgres || echo "STILL_NO_PG_LISTEN"
+
+          echo ""
+          echo "=== 6. Логи PostgreSQL ==="
+          tail -30 /var/log/postgresql/postgresql-18-main.log 2>/dev/null || echo "NO_LOG"
+
+          echo ""
+          echo "=== DONE ==="
+          HEREDOC
