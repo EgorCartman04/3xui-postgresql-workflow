@@ -40,7 +40,7 @@ ansible-playbook --syntax-check playbooks/site.yml
 ## SSH-подключение к серверу
 
 ```bash
-ssh -i ./.secrets/ssh/ansible_deploy_key root@2.26.230.91
+ssh -i ./.secrets/ssh/ansible_deploy_key root@2.26.230.90
 ```
 
 Системные таймауты:

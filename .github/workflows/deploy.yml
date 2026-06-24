@@ -24,9 +24,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup SSH key
+        env:
+          ANSIBLE_DEPLOY_KEY: ${{ secrets.ANSIBLE_DEPLOY_KEY }}
         run: |
           mkdir -p .secrets/ssh
-          printf '%s\n' "${{ secrets.ANSIBLE_DEPLOY_KEY }}" > .secrets/ssh/ansible_deploy_key
+          printf '%s\n' "$ANSIBLE_DEPLOY_KEY" > .secrets/ssh/ansible_deploy_key
           chmod 600 .secrets/ssh/ansible_deploy_key
           ssh-keygen -lf .secrets/ssh/ansible_deploy_key
 
@@ -42,17 +44,15 @@ jobs:
         run: ansible-playbook --syntax-check playbooks/site.yml
 
       - name: Deploy
-        run: |
-          ansible-playbook playbooks/site.yml \
-            --tags ${{ github.event.inputs.deploy_mode }} \
-            ${{
-              github.event.inputs.xui_version != ''
-              && format('-e xui_version={0}', github.event.inputs.xui_version)
-              || ''
-            }}
         env:
           XUI_ADMIN_USERNAME: ${{ secrets.XUI_ADMIN_USERNAME }}
           XUI_ADMIN_PASSWORD: ${{ secrets.XUI_ADMIN_PASSWORD }}
           XUI_PANEL_BASE_PATH: ${{ secrets.XUI_PANEL_BASE_PATH }}
           XUI_DB_PASSWORD: ${{ secrets.XUI_DB_PASSWORD }}
           ANSIBLE_REMOTE_USER: ${{ vars.ANSIBLE_REMOTE_USER || 'root' }}
+          DEPLOY_MODE: ${{ github.event.inputs.deploy_mode }}
+          XUI_VERSION: ${{ github.event.inputs.xui_version }}
+        run: |
+          ansible-playbook playbooks/site.yml \
+            --tags "$DEPLOY_MODE" \
+            ${XUI_VERSION:+-e xui_version="$XUI_VERSION"}
