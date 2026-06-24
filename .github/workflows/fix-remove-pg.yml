@@ -1,0 +1,54 @@
+name: Fix - Remove PG 18 and redeploy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        env:
+          ANSIBLE_DEPLOY_KEY: ${{ secrets.ANSIBLE_DEPLOY_KEY }}
+        run: |
+          mkdir -p .secrets/ssh
+          printf '%s\n' "$ANSIBLE_DEPLOY_KEY" > .secrets/ssh/ansible_deploy_key
+          chmod 600 .secrets/ssh/ansible_deploy_key
+
+      - name: Add remote host to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H 2.26.230.90 >> ~/.ssh/known_hosts
+
+      - name: Remove PostgreSQL 18 and free port 5432
+        run: |
+          ssh -o StrictHostKeyChecking=no -i .secrets/ssh/ansible_deploy_key root@2.26.230.90 'bash -s' << 'HEREDOC'
+          set -uo pipefail
+
+          echo "=== Остановка PG 18 ==="
+          systemctl stop postgresql@18-main 2>/dev/null || true
+          systemctl stop postgresql 2>/dev/null || true
+
+          echo "=== Проверка, что порт 5432 свободен ==="
+          ss -tlnp | grep 5432 && echo "PORT_5432_IN_USE" || echo "PORT_5432_FREE"
+
+          echo "=== Поиск процесса на 5432 ==="
+          fuser -v 5432/tcp 2>/dev/null || echo "NO_PROCESS_ON_5432"
+          lsof -i :5432 2>/dev/null || echo "NO_LSOF_5432"
+
+          echo "=== Удаление PG 18 ==="
+          pg_dropcluster 18 main --stop 2>/dev/null || true
+          apt-get purge -y postgresql-18 postgresql-client-18 2>/dev/null || true
+          apt-get autoremove -y 2>/dev/null || true
+
+          echo "=== Очистка остатков ==="
+          rm -rf /etc/postgresql/18 /var/lib/postgresql/18 /var/log/postgresql/postgresql-18-main.log 2>/dev/null || true
+          userdel -r postgres 2>/dev/null || true
+
+          echo "=== Финальная проверка порта ==="
+          ss -tlnp | grep 5432 && echo "PORT_5432_STILL_IN_USE" || echo "PORT_5432_FREE_OK"
+
+          echo "=== DONE ==="
+          HEREDOC
