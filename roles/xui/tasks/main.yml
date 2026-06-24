@@ -132,7 +132,18 @@
     group: root
     mode: "0755"
 
-- name: Настроить панель с PostgreSQL через x-ui CLI
+- name: Настроить параметры БД через systemd env-файл
+  ansible.builtin.template:
+    src: x-ui.env.j2
+    dest: /etc/default/x-ui
+    owner: root
+    group: root
+    mode: "0600"
+  notify:
+    - Reload systemd
+    - Restart x-ui
+
+- name: Настроить панель через x-ui CLI (учётные данные и путь)
   ansible.builtin.command:
     argv:
       - "{{ xui_install_dir }}/x-ui"
@@ -147,21 +158,9 @@
       - "{{ xui_panel_base_path }}"
       - -listenIP
       - "{{ xui_panel_listen_ip }}"
-      - -dbType
-      - "{{ xui_db_type }}"
-      - -dbHost
-      - "{{ xui_db_host }}"
-      - -dbPort
-      - "{{ xui_db_port | string }}"
-      - -dbName
-      - "{{ xui_db_name }}"
-      - -dbUser
-      - "{{ xui_db_user }}"
-      - -dbPassword
-      - "{{ xui_db_password }}"
-  notify: Restart x-ui
   register: xui_panel_pg_config
   changed_when: true
+  notify: Restart x-ui
 
 - name: Остановить x-ui перед миграцией
   ansible.builtin.service:
