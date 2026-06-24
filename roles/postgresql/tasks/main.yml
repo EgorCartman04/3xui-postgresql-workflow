@@ -15,6 +15,17 @@
     state: started
     enabled: true
 
+- name: Установить порт PostgreSQL на 5432
+  ansible.builtin.lineinfile:
+    path: "/etc/postgresql/18/main/postgresql.conf"
+    regexp: '^#?port\s*='
+    line: 'port = 5432'
+  notify: Restart postgresql
+
+# Синхронный restart, чтобы порт применился до всех остальных операций.
+- name: Применить изменение порта PostgreSQL
+  ansible.builtin.meta: flush_handlers
+
 - name: Проверить существование БД xui
   become: true
   become_user: postgres

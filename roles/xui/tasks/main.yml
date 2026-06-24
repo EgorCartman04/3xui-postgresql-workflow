@@ -171,31 +171,6 @@
 # pg_hba, пароль и reload PostgreSQL уже обработаны ролью postgresql
 # с синхронными flush_handlers (гарантированный порядок: pg_hba → reload → ALTER USER → reload).
 
-- name: "Диагностика: финальная проверка порта"
-  ansible.builtin.shell: |
-    set -uo pipefail
-    echo "=== Какой порт слушает PostgreSQL? ==="
-    pg_lsclusters 2>/dev/null || echo "no pg_lsclusters"
-    echo "=== ss слушающих сокетов ==="
-    ss -tlnp | grep postgres || echo "NO_PG_SOCKETS"
-    echo "=== pg_hba путь ==="
-    find /etc/postgresql -name pg_hba.conf 2>/dev/null
-    echo "=== psql через сокет (любой) ==="
-    sudo -u postgres psql -tAc "SELECT inet_server_addr(), inet_server_port();" 2>&1 || echo "SOCKET_FAILED"
-    echo "=== psql TCP 5432 ==="
-    PGPASSWORD='{{ xui_db_password }}' psql -h 127.0.0.1 -p 5432 -U xui -d xui -tAc "SELECT '5432_OK';" 2>&1 || echo "5432_FAILED"
-    echo "=== psql TCP 5433 ==="
-    PGPASSWORD='{{ xui_db_password }}' psql -h 127.0.0.1 -p 5433 -U xui -d xui -tAc "SELECT '5433_OK';" 2>&1 || echo "5433_FAILED"
-    echo "=== DONE ==="
-  args:
-    executable: /bin/bash
-  register: xui_auth_diag
-  changed_when: false
-
-- name: "Вывести диагностику auth"
-  ansible.builtin.debug:
-    var: xui_auth_diag.stdout_lines
-
 - name: Выполнить миграции 3x-ui (создание схемы в PostgreSQL)
   ansible.builtin.command: "{{ xui_install_dir }}/x-ui migrate"
   changed_when: false
