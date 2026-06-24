@@ -29,7 +29,7 @@ exec 9>"${lock_file}"
 flock -w {{ xui_port_sync_lock_wait_seconds | default(15) }} 9 || exit 0
 
 psql_cmd() {
-  psql -U "${PG_USER}" -d "${PG_DB}" -h "${PG_HOST}" -p "${PG_PORT}" -tA "$@"
+  psql -U "${PG_USER}" -d "${PG_DB}" -h "${PG_HOST}" -p "${PG_PORT}" -tA -F $'\t' "$@"
 }
 
 supports_transport() {
@@ -96,7 +96,7 @@ supports_transport() {
     printf '%s/tcp\n' "${sub_port_db}"
   fi
 
-  psql_cmd -c "SELECT port, protocol, COALESCE(stream_settings::text, ''), COALESCE(settings::text, '') FROM inbounds WHERE enable = true;" | \
+  psql_cmd -c "SELECT port, protocol, COALESCE(regexp_replace(stream_settings::text, E'[\\n\\r]+', ' ', 'g'), ''), COALESCE(regexp_replace(settings::text, E'[\\n\\r]+', ' ', 'g'), '') FROM inbounds WHERE enable = true;" | \
   while IFS=$'\t' read -r port protocol stream_settings settings; do
     [[ -n "${port}" ]] || continue
     while IFS= read -r transport; do
