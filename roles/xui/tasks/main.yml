@@ -171,22 +171,22 @@
 # pg_hba, пароль и reload PostgreSQL уже обработаны ролью postgresql
 # с синхронными flush_handlers (гарантированный порядок: pg_hba → reload → ALTER USER → reload).
 
-- name: "Диагностика: pg_hba, пароль дословно, psql verbose"
+- name: "Диагностика: финальная проверка порта"
   ansible.builtin.shell: |
     set -uo pipefail
-    echo "=== pg_hba.conf (строки с xui) ==="
-    grep -i 'xui' /etc/postgresql/*/main/pg_hba.conf || echo "NO_XUI_IN_PG_HBA"
-    echo "=== pg_hba.conf (все строки) ==="
-    cat /etc/postgresql/*/main/pg_hba.conf | grep -v '^#' | grep -v '^$' || echo "PG_HBA_EMPTY"
-    echo "=== Проверка: можно ли peer'ом войти под xui? ==="
-    sudo -u postgres psql -U xui -d xui -tAc "SELECT 'PEER_OK';" 2>&1 || echo "PEER_FAILED"
-    echo "=== Проверка: ALTER USER с доллар-квотингом ==="
-    sudo -u postgres psql -c "ALTER USER \"{{ xui_db_user }}\" WITH PASSWORD \$\${{ xui_db_password }}\$\$;"
-    echo "=== psql TCP с доллар-ALTER паролем ==="
-    PGPASSWORD='{{ xui_db_password }}' psql -h '{{ xui_db_host }}' -p '{{ xui_db_port }}' -U '{{ xui_db_user }}' -d '{{ xui_db_name }}' -tAc "SELECT 'OK';" 2>&1 || echo "TCP_FAILED"
-    echo "=== psql TCP verbose ==="
-    PGPASSWORD='{{ xui_db_password }}' psql "host={{ xui_db_host }} port={{ xui_db_port }} user={{ xui_db_user }} dbname={{ xui_db_name }}" -tAc "SELECT 'OK';" 2>&1 || echo "TCPV_FAILED"
-    echo "=== PSQL DONE ==="
+    echo "=== Какой порт слушает PostgreSQL? ==="
+    pg_lsclusters 2>/dev/null || echo "no pg_lsclusters"
+    echo "=== ss слушающих сокетов ==="
+    ss -tlnp | grep postgres || echo "NO_PG_SOCKETS"
+    echo "=== pg_hba путь ==="
+    find /etc/postgresql -name pg_hba.conf 2>/dev/null
+    echo "=== psql через сокет (любой) ==="
+    sudo -u postgres psql -tAc "SELECT inet_server_addr(), inet_server_port();" 2>&1 || echo "SOCKET_FAILED"
+    echo "=== psql TCP 5432 ==="
+    PGPASSWORD='{{ xui_db_password }}' psql -h 127.0.0.1 -p 5432 -U xui -d xui -tAc "SELECT '5432_OK';" 2>&1 || echo "5432_FAILED"
+    echo "=== psql TCP 5433 ==="
+    PGPASSWORD='{{ xui_db_password }}' psql -h 127.0.0.1 -p 5433 -U xui -d xui -tAc "SELECT '5433_OK';" 2>&1 || echo "5433_FAILED"
+    echo "=== DONE ==="
   args:
     executable: /bin/bash
   register: xui_auth_diag
