@@ -184,7 +184,7 @@
       set -euo pipefail
       echo "=== Пароль из /etc/default/x-ui (DSN) ==="
       DSN_PASS="$(grep -oP 'password=\K[^\s]+' /etc/default/x-ui || echo 'NOT_FOUND')"
-      printf 'DSN_PASS length: %s\n' "${#DSN_PASS}"
+      printf 'DSN_PASS length: %s\n' "$(printf '%s' "$DSN_PASS" | wc -c)"
       echo "=== Пароль из Ansible ==="
       printf 'ANSIBLE_PASS length: %s\n' '{{ xui_db_password | length }}'
       echo "=== Прямой тест psql с паролем из DSN ==="
