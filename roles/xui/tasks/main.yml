@@ -271,7 +271,7 @@
       echo /root/.acme.sh/acme.sh
       exit 0
     fi
-    found_path="$(find /root -maxdepth 6 \\( -type f -o -type l \\) -name acme.sh 2>/dev/null | head -n 1 || true)"
+    found_path="$(find /root -maxdepth 6 -type f -o -type l -name acme.sh 2>/dev/null | head -n 1 || true)"
     if [ -n "${found_path}" ]; then
       echo "${found_path}"
       exit 0
@@ -281,6 +281,8 @@
       exit 0
     fi
     echo ""
+  args:
+    executable: /bin/bash
   register: xui_acme_path_cmd
   changed_when: false
 

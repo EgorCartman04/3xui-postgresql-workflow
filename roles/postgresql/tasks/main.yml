@@ -1,9 +1,10 @@
 ---
-- name: Установить PostgreSQL
+- name: Установить PostgreSQL (включая postgresql-common)
   ansible.builtin.apt:
     name:
       - postgresql
       - postgresql-client
+      - postgresql-common
       - python3-psycopg2
     state: present
     update_cache: true
