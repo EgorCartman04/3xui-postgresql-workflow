@@ -54,6 +54,7 @@
     owner: root
     group: root
     mode: "0600"
+  failed_when: false
 
 - name: Проверить наличие runtime-артефактов менеджера для rollout backup
   ansible.builtin.stat:
