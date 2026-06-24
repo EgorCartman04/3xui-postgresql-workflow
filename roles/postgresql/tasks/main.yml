@@ -15,16 +15,26 @@
     state: started
     enabled: true
 
-- name: Установить порт PostgreSQL на 5432
+- name: Исправить порт PostgreSQL на 5432 (PG 18 default = 5433)
   ansible.builtin.lineinfile:
     path: "/etc/postgresql/18/main/postgresql.conf"
     regexp: '^#?port\s*='
     line: 'port = 5432'
+  register: pg_port_fix
   notify: Restart postgresql
 
-# Синхронный restart, чтобы порт применился до всех остальных операций.
-- name: Применить изменение порта PostgreSQL
+# Синхронный restart: порт должен примениться до всех остальных операций с БД.
+- name: Применить изменение порта (restart PostgreSQL)
   ansible.builtin.meta: flush_handlers
+
+# После restart явно убедиться, что PostgreSQL жив и слушает 5432.
+# systemd restart иногда возвращает успех до фактического запуска процесса.
+- name: Убедиться, что PostgreSQL запущен и слушает порт 5432
+  ansible.builtin.wait_for:
+    port: 5432
+    host: "{{ xui_db_host }}"
+    state: started
+    timeout: 30
 
 - name: Проверить существование БД xui
   become: true
