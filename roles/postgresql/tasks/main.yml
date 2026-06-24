@@ -86,6 +86,7 @@
     set -euo pipefail
     psql -c "CREATE USER \"{{ xui_db_user }}\" WITH PASSWORD '{{ xui_db_password }}';"
   when: "'missing' in xui_db_user_exists.stdout"
+  no_log: true
 
 - name: Создать БД xui (если не существует)
   become: true
@@ -128,6 +129,7 @@
     psql -c "ALTER USER \"{{ xui_db_user }}\" WITH PASSWORD '{{ xui_db_password }}';"
   when: "'exists' in xui_db_user_exists.stdout"
   changed_when: true
+  no_log: true
   notify: Reload postgresql
 
 - name: Применить изменения пароля перед миграцией

@@ -160,6 +160,7 @@
       - "{{ xui_panel_listen_ip }}"
   register: xui_panel_pg_config
   changed_when: true
+  no_log: true
   notify: Restart x-ui
 
 - name: Остановить x-ui перед миграцией
@@ -275,7 +276,7 @@
   ansible.builtin.shell: |
     set -eu
     tmp_acme_install_dir="$(mktemp -d /tmp/acme.sh.XXXXXX)"
-    curl -fSL https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh -o "${tmp_acme_install_dir}/acme.sh"
+    curl -fSL https://raw.githubusercontent.com/acmesh-official/acme.sh/{{ xui_acme_sh_version }}/acme.sh -o "${tmp_acme_install_dir}/acme.sh"
     chmod 0755 "${tmp_acme_install_dir}/acme.sh"
     cd "${tmp_acme_install_dir}"
     sh ./acme.sh --install --force
@@ -438,6 +439,7 @@
     fi
   args:
     executable: /bin/bash
+  no_log: true
   register: xui_runtime_domain_settings
   changed_when: "'unchanged' not in xui_runtime_domain_settings.stdout"
   notify: Restart x-ui

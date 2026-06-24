@@ -12,7 +12,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
-REMOTE_HOST="${XUI_TUNNEL_HOST:-2.26.101.31}"
+REMOTE_HOST="${XUI_TUNNEL_HOST:-2.26.230.90}"
 REMOTE_USER="${XUI_TUNNEL_USER:-root}"
 SSH_CONNECT_TIMEOUT="${XUI_TUNNEL_CONNECT_TIMEOUT:-8}"
 SERVICE_NAME="${XUI_SERVICE_NAME:-x-ui}"
@@ -85,7 +85,7 @@ print_help() {
     Не задавать интерактивное подтверждение перед применением
 
 Переменные окружения:
-  XUI_TUNNEL_HOST              SSH-хост сервера (по умолчанию: 2.26.101.31)
+  XUI_TUNNEL_HOST              SSH-хост сервера (по умолчанию: 2.26.230.90)
   XUI_TUNNEL_USER              SSH-пользователь (по умолчанию: root)
   XUI_TUNNEL_CONNECT_TIMEOUT   Таймаут подключения в секундах (по умолчанию: 8)
   XUI_TUNNEL_KEY_FILE          Явный путь к приватному SSH-ключу

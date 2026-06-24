@@ -63,6 +63,7 @@
     echo "updated:${changes}"
   args:
     executable: /bin/bash
+  no_log: true
   register: xui_template_result
   changed_when: "'updated:' in xui_template_result.stdout"
   notify: Restart x-ui
