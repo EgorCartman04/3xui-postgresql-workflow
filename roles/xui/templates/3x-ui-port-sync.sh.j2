@@ -32,8 +32,7 @@ psql_cmd() {
   psql -U "${PG_USER}" -d "${PG_DB}" -h "${PG_HOST}" -p "${PG_PORT}" -tA "$@"
 }
 
-{
-{% for port in xui_firewall_allowed_tcp_ports %}
+supports_transport() {
   local protocol="$1"
   local stream_settings="$2"
   local settings="$3"
