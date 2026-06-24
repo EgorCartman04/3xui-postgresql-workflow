@@ -265,13 +265,15 @@
   tags: [port-sync]
 
 - name: Определить путь acme.sh
+  vars:
+    find_group_expr: '\( -type f -o -type l \)'
   ansible.builtin.shell: |
     set -eu
     if [ -e /root/.acme.sh/acme.sh ]; then
       echo /root/.acme.sh/acme.sh
       exit 0
     fi
-    found_path="$(find /root -maxdepth 6 \( -type f -o -type l \) -name acme.sh 2>/dev/null | head -n 1 || true)"
+    found_path="$(find /root -maxdepth 6 {{ find_group_expr }} -name acme.sh 2>/dev/null | head -n 1 || true)"
     if [ -n "${found_path}" ]; then
       echo "${found_path}"
       exit 0
