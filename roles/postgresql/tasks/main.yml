@@ -41,6 +41,15 @@
     psql -c "CREATE USER \"{{ xui_db_user }}\" WITH PASSWORD '{{ xui_db_password }}';"
   when: "'missing' in xui_db_user_exists.stdout"
 
+- name: Синхронизировать пароль пользователя БД с секретом
+  become: true
+  become_user: postgres
+  ansible.builtin.shell: |
+    set -euo pipefail
+    psql -c "ALTER USER \"{{ xui_db_user }}\" WITH PASSWORD '{{ xui_db_password }}';"
+  when: "'exists' in xui_db_user_exists.stdout"
+  changed_when: true
+
 - name: Создать БД xui
   become: true
   become_user: postgres
