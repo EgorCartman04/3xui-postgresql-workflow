@@ -1,0 +1,56 @@
+name: Diagnostic 3 - Docker containers on port 5432
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        env:
+          ANSIBLE_DEPLOY_KEY: ${{ secrets.ANSIBLE_DEPLOY_KEY }}
+        run: |
+          mkdir -p .secrets/ssh
+          printf '%s\n' "$ANSIBLE_DEPLOY_KEY" > .secrets/ssh/ansible_deploy_key
+          chmod 600 .secrets/ssh/ansible_deploy_key
+
+      - name: Add remote host to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H 2.26.230.90 >> ~/.ssh/known_hosts
+
+      - name: Check Docker containers
+        run: |
+          ssh -o StrictHostKeyChecking=no -i .secrets/ssh/ansible_deploy_key root@2.26.230.90 'bash -s' << 'HEREDOC'
+          set -uo pipefail
+
+          echo "=== Все Docker контейнеры ==="
+          docker ps -a --format '{{.ID}} {{.Image}} {{.Names}} {{.Ports}} {{.Status}}' 2>/dev/null || echo "NO_DOCKER"
+
+          echo ""
+          echo "=== docker-proxy детали ==="
+          ps aux | grep docker-proxy | grep -v grep || echo "NO_PROXY"
+
+          echo ""
+          echo "=== Процесс на 5432 детально ==="
+          ss -tlnp | grep 5432
+          echo ""
+          fuser 5432/tcp 2>/dev/null && echo "FUSER_OK" || echo "FUSER_EMPTY"
+          echo ""
+          lsof -i :5432 2>/dev/null | head -10 || echo "NO_LSOF"
+
+          echo ""
+          echo "=== docker inspect на порт 5432 ==="
+          for cid in $(docker ps -q 2>/dev/null); do
+            ports=$(docker inspect --format '{{.Name}} {{.HostConfig.PortBindings}}' "$cid" 2>/dev/null)
+            if echo "$ports" | grep -q 5432; then
+              echo "CONTAINER: $ports"
+            fi
+          done
+
+          echo ""
+          echo "=== DONE ==="
+          HEREDOC
