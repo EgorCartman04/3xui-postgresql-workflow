@@ -1,0 +1,37 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart x-ui
+  ansible.builtin.service:
+    name: x-ui
+    state: restarted
+
+- name: Restart fail2ban
+  ansible.builtin.service:
+    name: fail2ban
+    state: restarted
+
+- name: Restart 3x-ui backup timer
+  ansible.builtin.systemd:
+    name: 3x-ui-backup.timer
+    state: restarted
+    enabled: true
+
+- name: Restart 3x-ui port sync path
+  ansible.builtin.systemd:
+    name: 3x-ui-port-sync.path
+    state: restarted
+    enabled: true
+
+- name: Restart 3x-ui port sync timer
+  ansible.builtin.systemd:
+    name: 3x-ui-port-sync.timer
+    state: restarted
+    enabled: true
+
+- name: Run 3x-ui port sync
+  ansible.builtin.systemd:
+    name: 3x-ui-port-sync.service
+    state: started

@@ -1,0 +1,371 @@
+#!/usr/bin/env bash
+# Обновление 3x-ui напрямую на сервере (без SSH-обертки)
+#
+# Использование:
+#   {{ xui_server_update_script_path }}
+#   {{ xui_server_update_script_path }} --latest
+#   {{ xui_server_update_script_path }} --version 3.0.2
+#   {{ xui_server_update_script_path }} --version v3.0.2 --yes
+
+set -euo pipefail
+
+SERVICE_NAME="{{ xui_service_name }}"
+INSTALL_DIR="{{ xui_install_dir }}"
+BACKUP_DIR="{{ xui_backup_dir }}"
+CERT_DIR="{{ xui_panel_cert_dir }}"
+BACKUP_PREFIX="manual-pre-update-3x-ui"
+
+RELEASE_OWNER="MHSanaei"
+RELEASE_REPO="3x-ui"
+
+CLI_USE_LATEST=0
+CLI_TARGET_VERSION=""
+CLI_ASSUME_YES=0
+
+TARGET_VERSION=""
+TARGET_SOURCE=""
+TARGET_STATUS=""
+CURRENT_VERSION=""
+RELEASE_ARCH=""
+SCRIPT_PATH="{{ xui_server_update_script_path }}"
+
+log_info() {
+    echo "[INFO] $*"
+}
+
+log_warn() {
+    echo "[WARN] $*" >&2
+}
+
+log_error() {
+    echo "[ERROR] $*" >&2
+}
+
+print_help() {
+        cat <<EOF
+Обновление 3x-ui напрямую на сервере
+
+Использование:
+    ${SCRIPT_PATH}
+    Интерактивный режим с выбором:
+      1) до последнего доступного релиза (stable/prerelease)
+      2) до версии, введенной вручную
+
+    ${SCRIPT_PATH} --latest
+    Обновить до последнего доступного релиза (stable/prerelease)
+
+    ${SCRIPT_PATH} --version <версия>
+    Обновить до указанной версии (можно с префиксом v и без)
+
+    ${SCRIPT_PATH} --yes
+    Не задавать интерактивное подтверждение перед применением
+EOF
+}
+
+require_cmd() {
+    local cmd="$1"
+    if ! command -v "${cmd}" >/dev/null 2>&1; then
+        log_error "Не найдена обязательная команда: ${cmd}"
+        exit 1
+    fi
+}
+
+ensure_root() {
+    if [[ "${EUID}" -ne 0 ]]; then
+        log_error "Запусти скрипт от root"
+        exit 1
+    fi
+}
+
+normalize_version_tag() {
+    local raw="$1"
+    raw="${raw#v}"
+    raw="${raw//[[:space:]]/}"
+
+    if [[ -z "${raw}" ]]; then
+        log_error "Пустая версия"
+        exit 1
+    fi
+
+    printf 'v%s' "${raw}"
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h)
+                print_help
+                exit 0
+                ;;
+            --latest)
+                CLI_USE_LATEST=1
+                shift
+                ;;
+            --version)
+                if [[ $# -lt 2 ]]; then
+                    log_error "Для --version нужно указать значение"
+                    exit 1
+                fi
+                CLI_TARGET_VERSION="$(normalize_version_tag "$2")"
+                shift 2
+                ;;
+            --yes|-y)
+                CLI_ASSUME_YES=1
+                shift
+                ;;
+            *)
+                log_error "Неизвестный аргумент: $1"
+                print_help
+                exit 1
+                ;;
+        esac
+    done
+
+    if [[ ${CLI_USE_LATEST} -eq 1 && -n "${CLI_TARGET_VERSION}" ]]; then
+        log_error "Нельзя одновременно использовать --latest и --version"
+        exit 1
+    fi
+}
+
+detect_arch_and_current_version() {
+    local arch
+
+    arch="$(uname -m)"
+    CURRENT_VERSION="$("${INSTALL_DIR}/x-ui" -v 2>/dev/null || true)"
+
+    case "${arch}" in
+        x86_64)
+            RELEASE_ARCH="amd64"
+            ;;
+        aarch64)
+            RELEASE_ARCH="arm64"
+            ;;
+        *)
+            log_error "Неподдерживаемая архитектура сервера: ${arch}"
+            exit 1
+            ;;
+    esac
+
+    if [[ -n "${CURRENT_VERSION}" ]]; then
+        log_info "Текущая версия: ${CURRENT_VERSION}"
+    else
+        log_warn "Текущая версия не определена (возможно, 3x-ui не установлен)"
+    fi
+}
+
+resolve_latest_release_tag() {
+    local api_url
+    local response
+
+    api_url="https://api.github.com/repos/${RELEASE_OWNER}/${RELEASE_REPO}/releases?per_page=20"
+    response="$(curl -fsSL --connect-timeout 10 --max-time 40 "${api_url}")" || {
+        log_error "Не удалось получить список релизов из GitHub API"
+        exit 1
+    }
+
+    if command -v jq >/dev/null 2>&1; then
+        TARGET_VERSION="$(printf '%s' "${response}" | jq -r '.[0].tag_name // empty')"
+        TARGET_STATUS="$(printf '%s' "${response}" | jq -r 'if .[0].prerelease then "prerelease" else "stable" end')"
+    elif command -v python3 >/dev/null 2>&1; then
+        local parsed
+        parsed="$(printf '%s' "${response}" | python3 -c '
+import json
+import sys
+
+releases = json.load(sys.stdin)
+if not releases:
+    raise SystemExit(1)
+latest = releases[0]
+print(latest.get("tag_name", ""))
+print("prerelease" if latest.get("prerelease") else "stable")
+')" || true
+        TARGET_VERSION="$(printf '%s\n' "${parsed}" | sed -n '1p')"
+        TARGET_STATUS="$(printf '%s\n' "${parsed}" | sed -n '2p')"
+    else
+        log_error "Нужен jq или python3 для парсинга GitHub API"
+        exit 1
+    fi
+
+    if [[ -z "${TARGET_VERSION}" ]]; then
+        log_error "GitHub API не вернул tag_name последнего релиза"
+        exit 1
+    fi
+
+    TARGET_SOURCE="latest"
+}
+
+choose_target_version() {
+    if [[ ${CLI_USE_LATEST} -eq 1 ]]; then
+        resolve_latest_release_tag
+        return
+    fi
+
+    if [[ -n "${CLI_TARGET_VERSION}" ]]; then
+        TARGET_VERSION="${CLI_TARGET_VERSION}"
+        TARGET_SOURCE="manual"
+        TARGET_STATUS="custom"
+        return
+    fi
+
+    local choice=""
+
+    echo
+    echo "Выбери режим обновления 3x-ui:"
+    echo "  1) До последнего доступного релиза (любой статус: stable/prerelease)"
+    echo "  2) Указать версию вручную"
+
+    while true; do
+        read -r -p "Ввод [1/2]: " choice
+        case "${choice}" in
+            1)
+                resolve_latest_release_tag
+                return
+                ;;
+            2)
+                read -r -p "Укажи версию (например 3.0.2 или v3.0.2): " choice
+                TARGET_VERSION="$(normalize_version_tag "${choice}")"
+                TARGET_SOURCE="manual"
+                TARGET_STATUS="custom"
+                return
+                ;;
+            *)
+                echo "Неверный выбор, введи 1 или 2."
+                ;;
+        esac
+    done
+}
+
+asset_url_for_version() {
+    local version_tag="$1"
+    printf 'https://github.com/%s/%s/releases/download/%s/x-ui-linux-%s.tar.gz' \
+        "${RELEASE_OWNER}" "${RELEASE_REPO}" "${version_tag}" "${RELEASE_ARCH}"
+}
+
+validate_target_release_asset() {
+    local url
+
+    url="$(asset_url_for_version "${TARGET_VERSION}")"
+    log_info "Проверка доступности релиза: ${TARGET_VERSION} (${RELEASE_ARCH})"
+
+    if ! curl -fsSIL --connect-timeout 10 --max-time 30 "${url}" >/dev/null; then
+        log_error "Не найден release-asset для ${TARGET_VERSION} (${RELEASE_ARCH})"
+        log_error "URL: ${url}"
+        exit 1
+    fi
+}
+
+confirm_plan() {
+    if [[ ${CLI_ASSUME_YES} -eq 1 ]]; then
+        return
+    fi
+
+    local answer=""
+
+    echo
+    echo "План обновления:"
+    echo "  Сервис:            ${SERVICE_NAME}"
+    echo "  Install dir:       ${INSTALL_DIR}"
+    echo "  Архитектура:       ${RELEASE_ARCH}"
+    if [[ -n "${CURRENT_VERSION}" ]]; then
+        echo "  Текущая версия:    ${CURRENT_VERSION}"
+    else
+        echo "  Текущая версия:    (не определена)"
+    fi
+    echo "  Целевая версия:    ${TARGET_VERSION}"
+    if [[ "${TARGET_SOURCE}" == "latest" ]]; then
+        echo "  Источник версии:   latest (${TARGET_STATUS})"
+    else
+        echo "  Источник версии:   manual"
+    fi
+    echo "  Backup:            ${BACKUP_DIR}/${BACKUP_PREFIX}-<version>-<timestamp>.tar.gz"
+
+    read -r -p "Продолжить? [y/N]: " answer
+    case "${answer}" in
+        y|Y|yes|YES)
+            ;;
+        *)
+            echo "Отменено пользователем."
+            exit 0
+            ;;
+    esac
+}
+
+run_update() {
+    local timestamp
+    local backup_file
+    local asset_name
+    local asset_url
+    local tmp_archive
+    local service_state
+    local new_version
+
+    timestamp="$(date +%Y%m%d-%H%M%S)"
+    backup_file="${BACKUP_DIR}/${BACKUP_PREFIX}-${TARGET_VERSION#v}-${timestamp}.tar.gz"
+    asset_name="x-ui-linux-${RELEASE_ARCH}.tar.gz"
+    asset_url="$(asset_url_for_version "${TARGET_VERSION}")"
+    tmp_archive="/tmp/${asset_name}"
+
+    mkdir -p "${BACKUP_DIR}"
+
+    local backup_sources=()
+    [[ -d "${INSTALL_DIR}" ]] && backup_sources+=("${INSTALL_DIR}")
+    [[ -d "/etc/x-ui" ]] && backup_sources+=("/etc/x-ui")
+    [[ -d "${CERT_DIR}" ]] && backup_sources+=("${CERT_DIR}")
+
+    if (( {% raw %}${#backup_sources[@]}{% endraw %} > 0 )); then
+        tar -czf "${backup_file}" "${backup_sources[@]}"
+        log_info "Backup создан: ${backup_file}"
+    else
+        log_warn "Backup пропущен: не найдены каталоги-источники"
+    fi
+
+    curl -fL --connect-timeout 10 --max-time 300 "${asset_url}" -o "${tmp_archive}"
+
+    systemctl stop "${SERVICE_NAME}" || true
+    rm -rf "${INSTALL_DIR}"
+    tar -xzf "${tmp_archive}" -C /usr/local
+
+    chown -R root:root "${INSTALL_DIR}"
+    chmod 0755 "${INSTALL_DIR}/x-ui" "${INSTALL_DIR}/x-ui.sh"
+    cp -f "${INSTALL_DIR}/x-ui.sh" /usr/bin/x-ui
+    chmod 0755 /usr/bin/x-ui
+
+    if [[ -f "${INSTALL_DIR}/x-ui.service.debian" ]]; then
+        cp -f "${INSTALL_DIR}/x-ui.service.debian" "/etc/systemd/system/${SERVICE_NAME}.service"
+    fi
+
+    systemctl daemon-reload
+    systemctl enable "${SERVICE_NAME}"
+    "${INSTALL_DIR}/x-ui" migrate
+
+    systemctl restart "${SERVICE_NAME}"
+
+    service_state="$(systemctl is-active "${SERVICE_NAME}" || true)"
+    if [[ "${service_state}" != "active" ]]; then
+        log_error "Сервис ${SERVICE_NAME} не active после обновления"
+        journalctl -u "${SERVICE_NAME}" --no-pager -n 50 || true
+        exit 1
+    fi
+
+    new_version="$("${INSTALL_DIR}/x-ui" -v 2>/dev/null || true)"
+    log_info "Обновление завершено успешно: ${new_version}"
+
+    rm -f "${tmp_archive}" || true
+}
+
+main() {
+    ensure_root
+    parse_args "$@"
+
+    require_cmd curl
+    require_cmd tar
+    require_cmd systemctl
+
+    detect_arch_and_current_version
+    choose_target_version
+    validate_target_release_asset
+    confirm_plan
+    run_update
+}
+
+main "$@"

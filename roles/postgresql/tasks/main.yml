@@ -1,0 +1,82 @@
+---
+- name: Установить PostgreSQL
+  ansible.builtin.apt:
+    name:
+      - postgresql
+      - postgresql-client
+      - python3-psycopg2
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Запустить и включить PostgreSQL
+  ansible.builtin.service:
+    name: postgresql
+    state: started
+    enabled: true
+
+- name: Проверить существование БД xui
+  become: true
+  become_user: postgres
+  ansible.builtin.shell: |
+    set -euo pipefail
+    psql -tAc "SELECT 1 FROM pg_database WHERE datname='{{ xui_db_name }}'" | grep -q 1 && echo "exists" || echo "missing"
+  register: xui_db_exists
+  changed_when: false
+
+- name: Проверить существование пользователя БД
+  become: true
+  become_user: postgres
+  ansible.builtin.shell: |
+    set -euo pipefail
+    psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='{{ xui_db_user }}'" | grep -q 1 && echo "exists" || echo "missing"
+  register: xui_db_user_exists
+  changed_when: false
+
+- name: Создать пользователя БД для x-ui
+  become: true
+  become_user: postgres
+  ansible.builtin.shell: |
+    set -euo pipefail
+    psql -c "CREATE USER \"{{ xui_db_user }}\" WITH PASSWORD '{{ xui_db_password }}';"
+  when: "'missing' in xui_db_user_exists.stdout"
+
+- name: Создать БД xui
+  become: true
+  become_user: postgres
+  ansible.builtin.shell: |
+    set -euo pipefail
+    psql -c "CREATE DATABASE \"{{ xui_db_name }}\" OWNER \"{{ xui_db_user }}\";"
+  when: "'missing' in xui_db_exists.stdout"
+
+- name: Проверить pg_hba.conf на наличие записи xui
+  ansible.builtin.shell: |
+    set -euo pipefail
+    grep -q "{{ xui_db_user }}" /etc/postgresql/*/main/pg_hba.conf && echo "found" || echo "missing"
+  register: xui_pg_hba_entry
+  changed_when: false
+
+- name: Добавить локальный доступ для пользователя xui в pg_hba.conf
+  ansible.builtin.shell: |
+    set -euo pipefail
+    hba_file="$(find /etc/postgresql -name pg_hba.conf -path "*/main/*" | head -n 1)"
+    if [ -z "${hba_file}" ]; then
+      echo "ERROR: pg_hba.conf not found"
+      exit 1
+    fi
+    echo "# 3x-ui local access" >> "${hba_file}"
+    echo "local   {{ xui_db_name }}   {{ xui_db_user }}   md5" >> "${hba_file}"
+    echo "host    {{ xui_db_name }}   {{ xui_db_user }}   127.0.0.1/32   md5" >> "${hba_file}"
+    echo "host    {{ xui_db_name }}   {{ xui_db_user }}   ::1/128       md5" >> "${hba_file}"
+  when: "'missing' in xui_pg_hba_entry.stdout"
+  notify: Restart postgresql
+
+- name: Сохранить учётные данные БД в /root/3x-ui-access.txt
+  ansible.builtin.lineinfile:
+    path: /root/3x-ui-access.txt
+    line: "PostgreSQL: host={{ xui_db_host }} port={{ xui_db_port }} db={{ xui_db_name }} user={{ xui_db_user }}"
+    create: true
+    owner: root
+    group: root
+    mode: "0600"
+    state: present

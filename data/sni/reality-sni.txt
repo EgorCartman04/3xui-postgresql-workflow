@@ -1,0 +1,11 @@
+# Формат:
+#   hostname
+#   hostname:443 | sni1,sni2
+#
+# Для VLESS+REALITY безопаснее вращать не абстрактный SNI сам по себе,
+# а связку target + допустимые serverNames. Если порт не указан, будет использован 443.
+
+www.samsung.com:443 | www.samsung.com,samsung.com
+www.google.com:443 | www.google.com,google.com
+www.max.ru:443 | www.max.ru,max.ru
+video.mail.ru:443 | video.mail.ru,www.mail.ru

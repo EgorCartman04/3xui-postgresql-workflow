@@ -1,0 +1,16 @@
+[Unit]
+Description=Локальный UI менеджера Reality SNI и fail2ban
+After=network-online.target fail2ban.service x-ui.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 {{ xui_manager_install_dir }}/manager.py serve --config {{ xui_manager_config_path }}
+Restart=always
+RestartSec=2
+WorkingDirectory={{ xui_manager_install_dir }}
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

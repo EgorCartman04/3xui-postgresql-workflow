@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+# Восстановление 3x-ui и/или SNI Manager напрямую на сервере (без SSH-обертки)
+#
+# Использование:
+#   {{ xui_server_restore_script_path }}
+#   {{ xui_server_restore_script_path }} --fetch-latest
+#   {{ xui_server_restore_script_path }} --list
+#   {{ xui_server_restore_script_path }} /var/backups/3x-ui/3x-ui-20260519-120000.tar.gz
+
+set -euo pipefail
+
+SERVICE_NAME="{{ xui_service_name }}"
+XUI_MANAGER_SERVICE_NAME="{{ xui_manager_service_name }}"
+BACKUP_DIR="{{ xui_backup_dir }}"
+SCRIPT_PATH="{{ xui_server_restore_script_path }}"
+
+print_help() {
+        cat <<EOF
+Восстановление 3x-ui и/или SNI Manager напрямую на сервере
+
+Использование:
+    ${SCRIPT_PATH}
+    Восстановить из последнего бэкапа в /var/backups/3x-ui
+
+    ${SCRIPT_PATH} --fetch-latest
+    Эквивалент запуску без аргументов
+
+    ${SCRIPT_PATH} --list
+    Показать доступные бэкапы
+
+    ${SCRIPT_PATH} <backup-file>
+    Восстановить из указанного файла (абсолютный или относительный путь)
+
+    ${SCRIPT_PATH} --scope xui|sni|all
+    Не задавать интерактивный вопрос о том, что восстанавливать
+EOF
+}
+
+log_info() {
+    echo "[INFO] $*"
+}
+
+log_warn() {
+    echo "[WARN] $*" >&2
+}
+
+log_error() {
+    echo "[ERROR] $*" >&2
+}
+
+ensure_root() {
+    if [[ "${EUID}" -ne 0 ]]; then
+        log_error "Запусти скрипт от root"
+        exit 1
+    fi
+}
+
+list_backups() {
+    log_info "Доступные бэкапы в ${BACKUP_DIR}:"
+    ls -lh "${BACKUP_DIR}"/3x-ui-*.tar.gz 2>/dev/null | tail -20 || {
+        log_warn "Нет бэкапов или каталог не доступен"
+        return 1
+    }
+}
+
+get_latest_backup() {
+    ls -1t "${BACKUP_DIR}"/3x-ui-*.tar.gz 2>/dev/null | head -1
+}
+
+backup_contains_xui_data() {
+    local backup_path="$1"
+    tar -tzf "${backup_path}" | grep -Eq '^(etc/x-ui(/|$)|usr/local/x-ui/bin/config.json$|root/cert(/|$))'
+}
+
+backup_contains_sni_data() {
+    local backup_path="$1"
+    tar -tzf "${backup_path}" | grep -Eq '^(etc/3x-ui-manager(/|$)|var/lib/3x-ui-manager/state.json$)'
+}
+
+choose_restore_scope() {
+    if [[ -n "${CLI_SCOPE:-}" ]]; then
+        echo "${CLI_SCOPE}"
+        return 0
+    fi
+
+    if [[ ! -t 0 ]]; then
+        log_warn "Нет интерактивного stdin: выбран режим восстановления all"
+        echo "all"
+        return 0
+    fi
+
+    while true; do
+        echo
+        echo "Выбери, что восстанавливать:"
+        echo "  1) 3x-ui"
+        echo "  2) SNI Manager"
+        echo "  3) All"
+        printf "Введите номер [1-3]: "
+        read -r choice
+        case "${choice}" in
+            1) echo "xui"; return 0 ;;
+            2) echo "sni"; return 0 ;;
+            3) echo "all"; return 0 ;;
+            *) log_warn "Некорректный выбор: ${choice}" ;;
+        esac
+    done
+}
+
+stop_services_for_scope() {
+    local scope="$1"
+    case "${scope}" in
+        xui)
+            log_info "Остановка сервиса ${SERVICE_NAME}..."
+            systemctl stop "${SERVICE_NAME}"
+            ;;
+        sni)
+            log_info "Остановка сервиса ${XUI_MANAGER_SERVICE_NAME}..."
+            systemctl stop "${XUI_MANAGER_SERVICE_NAME}"
+            ;;
+        all)
+            log_info "Остановка сервисов ${SERVICE_NAME} и ${XUI_MANAGER_SERVICE_NAME}..."
+            systemctl stop "${SERVICE_NAME}"
+            systemctl stop "${XUI_MANAGER_SERVICE_NAME}"
+            ;;
+    esac
+}
+
+start_services_for_scope() {
+    local scope="$1"
+    case "${scope}" in
+        xui)
+            log_info "Запуск сервиса ${SERVICE_NAME}..."
+            systemctl start "${SERVICE_NAME}"
+            ;;
+        sni)
+            log_info "Запуск сервиса ${XUI_MANAGER_SERVICE_NAME}..."
+            systemctl start "${XUI_MANAGER_SERVICE_NAME}"
+            ;;
+        all)
+            log_info "Запуск сервисов ${SERVICE_NAME} и ${XUI_MANAGER_SERVICE_NAME}..."
+            systemctl start "${SERVICE_NAME}"
+            systemctl start "${XUI_MANAGER_SERVICE_NAME}"
+            ;;
+    esac
+}
+
+verify_services_for_scope() {
+    local scope="$1"
+    case "${scope}" in
+        xui)
+            systemctl is-active "${SERVICE_NAME}" | grep -q "active"
+            ;;
+        sni)
+            systemctl is-active "${XUI_MANAGER_SERVICE_NAME}" | grep -q "active"
+            ;;
+        all)
+            systemctl is-active "${SERVICE_NAME}" | grep -q "active" \
+                && systemctl is-active "${XUI_MANAGER_SERVICE_NAME}" | grep -q "active"
+            ;;
+    esac
+}
+
+print_journal_for_scope() {
+    local scope="$1"
+    case "${scope}" in
+        xui)
+            journalctl -u "${SERVICE_NAME}" --no-pager -n 30 || true
+            ;;
+        sni)
+            journalctl -u "${XUI_MANAGER_SERVICE_NAME}" --no-pager -n 30 || true
+            ;;
+        all)
+            journalctl -u "${SERVICE_NAME}" --no-pager -n 30 || true
+            journalctl -u "${XUI_MANAGER_SERVICE_NAME}" --no-pager -n 30 || true
+            ;;
+    esac
+}
+
+extract_archive_for_scope() {
+    local backup_path="$1"
+    local scope="$2"
+    case "${scope}" in
+        xui)
+            cd /
+            tar -xzf "${backup_path}" --wildcards 'etc/x-ui*' 'usr/local/x-ui/bin/config.json' 'root/cert*'
+            ;;
+        sni)
+            cd /
+            tar -xzf "${backup_path}" --wildcards 'etc/3x-ui-manager*' 'var/lib/3x-ui-manager/state.json'
+            ;;
+        all)
+            cd /
+            tar -xzf "${backup_path}"
+            ;;
+    esac
+}
+
+restore_from_backup() {
+    local backup_path="$1"
+    local restore_scope="$2"
+
+    if [[ ! -f "${backup_path}" ]]; then
+        log_error "Бэкап не найден: ${backup_path}"
+        exit 1
+    fi
+
+    if [[ "${restore_scope}" == "xui" ]] && ! backup_contains_xui_data "${backup_path}"; then
+        log_error "В архиве нет данных 3x-ui для выбранного режима"
+        exit 1
+    fi
+
+    if [[ "${restore_scope}" == "sni" ]] && ! backup_contains_sni_data "${backup_path}"; then
+        log_error "В архиве нет данных SNI Manager для выбранного режима"
+        exit 1
+    fi
+
+    stop_services_for_scope "${restore_scope}" || {
+        log_error "Не удалось остановить сервисы перед восстановлением"
+        exit 1
+    }
+
+    extract_archive_for_scope "${backup_path}" "${restore_scope}" || {
+        log_error "Не удалось распаковать бэкап"
+        start_services_for_scope "${restore_scope}" || true
+        exit 1
+    }
+
+    start_services_for_scope "${restore_scope}" || {
+        log_error "Не удалось запустить сервисы после восстановления"
+        exit 1
+    }
+
+    sleep 2
+    if verify_services_for_scope "${restore_scope}"; then
+        log_info "Восстановление успешно завершено"
+    else
+        log_error "Сервисы не запустились после восстановления"
+        print_journal_for_scope "${restore_scope}"
+        exit 1
+    fi
+}
+
+resolve_backup_path() {
+    local backup_arg="${1:-}"
+    if [[ -z "${backup_arg}" ]]; then
+        local latest
+        latest="$(get_latest_backup)"
+        if [[ -z "${latest}" ]]; then
+            log_error "Не найдено бэкапов в ${BACKUP_DIR}"
+            exit 1
+        fi
+        echo "${latest}"
+        return 0
+    fi
+
+    if [[ "${backup_arg}" = /* ]]; then
+        echo "${backup_arg}"
+    else
+        echo "$(cd -- "$(dirname -- "${backup_arg}")" && pwd)/$(basename -- "${backup_arg}")"
+    fi
+}
+
+validate_scope_arg() {
+    local value="$1"
+    case "${value}" in
+        xui|sni|all) ;;
+        *)
+            log_error "Некорректный scope: ${value} (ожидается xui|sni|all)"
+            exit 1
+            ;;
+    esac
+}
+
+main() {
+    ensure_root
+
+    local cmd=""
+    local backup_arg=""
+    CLI_SCOPE=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h)
+                print_help
+                exit 0
+                ;;
+            --list)
+                list_backups
+                exit 0
+                ;;
+            --fetch-latest)
+                cmd="fetch_latest"
+                shift
+                ;;
+            --scope)
+                if [[ $# -lt 2 ]]; then
+                    log_error "Для --scope нужно указать xui|sni|all"
+                    exit 1
+                fi
+                CLI_SCOPE="$2"
+                validate_scope_arg "${CLI_SCOPE}"
+                shift 2
+                ;;
+            --*)
+                log_error "Неизвестный аргумент: $1"
+                print_help
+                exit 1
+                ;;
+            *)
+                if [[ -n "${backup_arg}" ]]; then
+                    log_error "Можно передать только один путь к бэкапу"
+                    exit 1
+                fi
+                backup_arg="$1"
+                shift
+                ;;
+        esac
+    done
+
+    local backup_path=""
+    local restore_scope=""
+
+    if [[ "${cmd}" == "fetch_latest" ]]; then
+        backup_path="$(resolve_backup_path "")"
+    elif [[ -n "${backup_arg}" ]]; then
+        backup_path="$(resolve_backup_path "${backup_arg}")"
+    else
+        backup_path="$(resolve_backup_path "")"
+    fi
+
+    restore_scope="$(choose_restore_scope)"
+    log_info "Выбран режим восстановления: ${restore_scope}"
+    log_info "Используемый бэкап: ${backup_path}"
+
+    restore_from_backup "${backup_path}" "${restore_scope}"
+}
+
+main "$@"

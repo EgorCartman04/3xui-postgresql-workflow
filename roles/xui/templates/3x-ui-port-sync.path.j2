@@ -1,0 +1,10 @@
+[Unit]
+Description=Отслеживание изменений базы 3x-ui для синхронизации UFW
+
+[Path]
+PathModified={{ xui_db_path }}
+PathChanged={{ xui_db_path }}
+Unit=3x-ui-port-sync.service
+
+[Install]
+WantedBy=multi-user.target

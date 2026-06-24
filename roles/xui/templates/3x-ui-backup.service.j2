@@ -1,0 +1,7 @@
+[Unit]
+Description=Backup 3x-ui configuration and certificates
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/3x-ui-backup.sh

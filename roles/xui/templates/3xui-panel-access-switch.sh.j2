@@ -1,0 +1,693 @@
+#!/usr/bin/env bash
+# Переключение режима доступа к панели 3x-ui напрямую на сервере.
+#
+# Использование:
+#   {{ xui_server_panel_access_script_path }}
+#   {{ xui_server_panel_access_script_path }} --mode tunnel
+#   {{ xui_server_panel_access_script_path }} --mode direct
+
+set -euo pipefail
+
+XUI_BIN="{{ xui_install_dir }}/x-ui"
+PG_USER="{{ xui_db_user }}"
+PG_DB="{{ xui_db_name }}"
+PG_HOST="{{ xui_db_host }}"
+PG_PORT="{{ xui_db_port }}"
+SERVICE_NAME="{{ xui_service_name }}"
+DEFAULT_PANEL_PORT="{{ xui_panel_port }}"
+PANEL_BASE_PATH="{{ xui_panel_base_path }}"
+PANEL_DOMAIN="{{ xui_domain }}"
+TUNNEL_LISTEN_IP="{{ xui_panel_listen_ip }}"
+DIRECT_LISTEN_IP="{{ xui_panel_direct_listen_ip }}"
+SNI_MANAGER_CONFIG_PATH="{{ xui_manager_config_path }}"
+SNI_MANAGER_SERVICE_NAME="{{ xui_manager_service_name }}"
+SNI_MANAGER_TUNNEL_LISTEN_IP="{{ xui_manager_listen_ip }}"
+SNI_MANAGER_DIRECT_LISTEN_IP="{{ xui_panel_direct_listen_ip }}"
+DEFAULT_SNI_MANAGER_PORT="{{ xui_manager_port }}"
+SCRIPT_PATH="{{ xui_server_panel_access_script_path }}"
+BACKUP_DIR="{{ xui_backup_dir }}/panel-access-switch"
+UFW_DIRECT_RULE_COMMENT="3x-ui-panel-direct-access"
+UFW_SNI_DIRECT_RULE_COMMENT="3x-ui-sni-manager-direct-access"
+STATE_DIR="{{ xui_panel_access_state_dir }}"
+STATE_FILE="${STATE_DIR}/panel-access-state.env"
+GUARD_CONFIG_FILE="${STATE_DIR}/guard-config.env"
+DEFAULT_MAX_DIRECT_SECONDS={{ xui_panel_direct_max_seconds | int }}
+
+CLI_MODE=""
+CLI_PRINT_CURRENT_MODE=0
+EFFECTIVE_PANEL_PORT=""
+EFFECTIVE_BASE_PATH=""
+EFFECTIVE_SNI_MANAGER_PORT=""
+
+log_info() {
+    echo "[INFO] $*"
+}
+
+log_warn() {
+    echo "[WARN] $*" >&2
+}
+
+log_error() {
+    echo "[ERROR] $*" >&2
+}
+
+print_help() {
+    cat <<EOF
+Переключение режима доступа к панели 3x-ui и SNI Manager
+
+Использование:
+  ${SCRIPT_PATH}
+    Интерактивное меню:
+        1) Direct mode
+            2) Tunnel mode
+            3) Configure auto-rollback timeout
+            4) Exit
+
+    ${SCRIPT_PATH} --mode tunnel
+        Переключить панель и SNI Manager в Tunnel mode
+
+    ${SCRIPT_PATH} --mode direct
+        Переключить панель и SNI Manager в Direct mode
+
+    ${SCRIPT_PATH} --current-mode
+        Вывести текущий режим (tunnel|direct|unknown)
+EOF
+}
+
+read_guard_timeout_seconds() {
+    local configured=""
+
+    if [[ -f "${GUARD_CONFIG_FILE}" ]]; then
+        # shellcheck disable=SC1090
+        source "${GUARD_CONFIG_FILE}" || true
+        configured="${max_direct_seconds:-}"
+    fi
+
+    if [[ "${configured}" =~ ^[0-9]+$ ]] && (( configured > 0 )); then
+        echo "${configured}"
+        return
+    fi
+
+    echo "${DEFAULT_MAX_DIRECT_SECONDS}"
+}
+
+print_guard_settings() {
+    local timeout_seconds timeout_minutes source
+
+    timeout_seconds="$(read_guard_timeout_seconds)"
+    timeout_minutes="$((timeout_seconds / 60))"
+    source="default"
+    if [[ -f "${GUARD_CONFIG_FILE}" ]]; then
+        source="runtime"
+    fi
+
+    echo "Настройки auto-rollback direct -> tunnel:"
+    echo "- timeout_seconds=${timeout_seconds}"
+    echo "- timeout_minutes=${timeout_minutes}"
+    echo "- source=${source}"
+    echo "- config_file=${GUARD_CONFIG_FILE}"
+}
+
+set_guard_timeout_seconds() {
+    local new_seconds="$1"
+
+    if [[ ! "${new_seconds}" =~ ^[0-9]+$ ]] || (( new_seconds <= 0 )); then
+        log_error "Таймаут должен быть положительным целым числом секунд"
+        return 1
+    fi
+
+    mkdir -p "${STATE_DIR}"
+    {
+        echo "max_direct_seconds=${new_seconds}"
+        echo "updated_at_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "${GUARD_CONFIG_FILE}"
+
+    log_info "Сохранен новый таймаут auto-rollback: ${new_seconds} сек"
+}
+
+configure_guard_timeout_interactively() {
+    local current_seconds current_minutes new_minutes new_seconds
+
+    current_seconds="$(read_guard_timeout_seconds)"
+    current_minutes="$((current_seconds / 60))"
+
+    echo
+    print_guard_settings
+    echo
+    read -r -p "Новый таймаут в минутах (Enter = без изменений): " new_minutes
+
+    if [[ -z "${new_minutes}" ]]; then
+        echo "Изменения отменены."
+        return
+    fi
+
+    if [[ ! "${new_minutes}" =~ ^[0-9]+$ ]] || (( new_minutes <= 0 )); then
+        log_error "Нужно ввести положительное целое число минут"
+        return
+    fi
+
+    new_seconds=$((new_minutes * 60))
+    set_guard_timeout_seconds "${new_seconds}"
+    echo "Новый таймаут: ${new_minutes} мин (${new_seconds} сек)"
+    echo
+    print_guard_settings
+}
+
+require_cmd() {
+    local cmd="$1"
+    if ! command -v "${cmd}" >/dev/null 2>&1; then
+        log_error "Не найдена обязательная команда: ${cmd}"
+        exit 1
+    fi
+}
+
+ensure_root() {
+    if [[ "${EUID}" -ne 0 ]]; then
+        log_error "Запусти скрипт от root"
+        exit 1
+    fi
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h)
+                print_help
+                exit 0
+                ;;
+            --mode)
+                if [[ $# -lt 2 ]]; then
+                    log_error "Для --mode нужно указать tunnel или direct"
+                    exit 1
+                fi
+                CLI_MODE="$2"
+                shift 2
+                ;;
+            --current-mode)
+                CLI_PRINT_CURRENT_MODE=1
+                shift
+                ;;
+            *)
+                log_error "Неизвестный аргумент: $1"
+                print_help
+                exit 1
+                ;;
+        esac
+    done
+
+    if [[ -n "${CLI_MODE}" && "${CLI_MODE}" != "tunnel" && "${CLI_MODE}" != "direct" ]]; then
+        log_error "Неподдерживаемый режим: ${CLI_MODE}. Допустимо: tunnel, direct"
+        exit 1
+    fi
+}
+
+detect_current_mode() {
+    local current_listen_ip=""
+    local listen_addr=""
+
+    if command -v ss >/dev/null 2>&1; then
+        listen_addr="$(ss -ltn 2>/dev/null | awk -v p=":${EFFECTIVE_PANEL_PORT}" '$4 ~ (p "$") { print $4; exit }' || true)"
+
+        if [[ -n "${listen_addr}" ]]; then
+            case "${listen_addr}" in
+                127.0.0.1:${EFFECTIVE_PANEL_PORT}|[::1]:${EFFECTIVE_PANEL_PORT})
+                    echo "tunnel"
+                    return
+                    ;;
+                0.0.0.0:${EFFECTIVE_PANEL_PORT}|[::]:${EFFECTIVE_PANEL_PORT})
+                    echo "direct"
+                    return
+                    ;;
+                *)
+                    # Любой non-loopback bind считаем прямым доступом.
+                    if [[ "${listen_addr}" != 127.0.0.1:${EFFECTIVE_PANEL_PORT} && "${listen_addr}" != [::1]:${EFFECTIVE_PANEL_PORT} ]]; then
+                        echo "direct"
+                        return
+                    fi
+                    ;;
+            esac
+        fi
+    fi
+
+    current_listen_ip="$(psql -U "${PG_USER}" -d "${PG_DB}" -h "${PG_HOST}" -p "${PG_PORT}" -tA -c "SELECT COALESCE(value, '') FROM settings WHERE key='webListen' LIMIT 1;" 2>/dev/null || true)"
+    current_listen_ip="${current_listen_ip//[$'\r\n']/}"
+
+    if [[ "${current_listen_ip}" == "${TUNNEL_LISTEN_IP}" ]]; then
+        echo "tunnel"
+        return
+    fi
+
+    if [[ "${current_listen_ip}" == "${DIRECT_LISTEN_IP}" ]]; then
+        echo "direct"
+        return
+    fi
+
+    echo "unknown"
+}
+
+describe_mode() {
+    local mode="$1"
+    case "${mode}" in
+        tunnel)
+            echo "Tunnel mode"
+            ;;
+        direct)
+            echo "Direct mode"
+            ;;
+        *)
+            echo "Unknown"
+            ;;
+    esac
+}
+
+panel_url() {
+    if [[ -n "${EFFECTIVE_BASE_PATH}" ]]; then
+        echo "https://${PANEL_DOMAIN}:${EFFECTIVE_PANEL_PORT}/${EFFECTIVE_BASE_PATH}/"
+    else
+        echo "https://${PANEL_DOMAIN}:${EFFECTIVE_PANEL_PORT}/"
+    fi
+}
+
+sni_manager_url() {
+    echo "https://${PANEL_DOMAIN}:${EFFECTIVE_SNI_MANAGER_PORT}/"
+}
+
+resolve_panel_port_from_db() {
+    local from_db=""
+
+    from_db="$(psql -U "${PG_USER}" -d "${PG_DB}" -h "${PG_HOST}" -p "${PG_PORT}" -tA -c "SELECT COALESCE(value, '') FROM settings WHERE key='webPort' LIMIT 1;" 2>/dev/null || true)"
+    from_db="${from_db//[$'\r\n']/}"
+
+    if [[ -n "${from_db}" ]]; then
+        printf '%s' "${from_db}"
+        return
+    fi
+
+    from_db="$(psql -U "${PG_USER}" -d "${PG_DB}" -h "${PG_HOST}" -p "${PG_PORT}" -tA -c "SELECT COALESCE(value, '') FROM settings WHERE key='port' LIMIT 1;" 2>/dev/null || true)"
+    from_db="${from_db//[$'\r\n']/}"
+    printf '%s' "${from_db}"
+}
+
+resolve_effective_panel_port() {
+    local discovered=""
+
+    discovered="$(resolve_panel_port_from_db)"
+    if [[ "${discovered}" =~ ^[0-9]+$ ]] && (( discovered >= 1 && discovered <= 65535 )); then
+        EFFECTIVE_PANEL_PORT="${discovered}"
+        return
+    fi
+
+    EFFECTIVE_PANEL_PORT="${DEFAULT_PANEL_PORT}"
+}
+
+resolve_sni_manager_port_from_config() {
+    local from_cfg=""
+
+    if [[ ! -f "${SNI_MANAGER_CONFIG_PATH}" ]]; then
+        printf '%s' ""
+        return
+    fi
+
+    from_cfg="$(jq -r '.listen_port // empty' "${SNI_MANAGER_CONFIG_PATH}" 2>/dev/null || true)"
+    from_cfg="${from_cfg//[$'\r\n']/}"
+    printf '%s' "${from_cfg}"
+}
+
+resolve_effective_sni_manager_port() {
+    local discovered=""
+
+    discovered="$(resolve_sni_manager_port_from_config)"
+    if [[ "${discovered}" =~ ^[0-9]+$ ]] && (( discovered >= 1 && discovered <= 65535 )); then
+        EFFECTIVE_SNI_MANAGER_PORT="${discovered}"
+        return
+    fi
+
+    EFFECTIVE_SNI_MANAGER_PORT="${DEFAULT_SNI_MANAGER_PORT}"
+}
+
+normalize_base_path() {
+    local raw="$1"
+
+    raw="${raw#'/'}"
+    raw="${raw%'/'}"
+    printf '%s' "${raw}"
+}
+
+resolve_base_path_from_db() {
+    local from_db=""
+
+    from_db="$(psql -U "${PG_USER}" -d "${PG_DB}" -h "${PG_HOST}" -p "${PG_PORT}" -tA -c "SELECT COALESCE(value, '') FROM settings WHERE key='webBasePath' LIMIT 1;" 2>/dev/null || true)"
+    from_db="${from_db//[$'\r\n']/}"
+    normalize_base_path "${from_db}"
+}
+
+resolve_effective_base_path() {
+    local configured="" discovered=""
+
+    configured="$(normalize_base_path "${PANEL_BASE_PATH}")"
+    if [[ -n "${configured}" ]]; then
+        EFFECTIVE_BASE_PATH="${configured}"
+        return
+    fi
+
+    discovered="$(resolve_base_path_from_db)"
+    EFFECTIVE_BASE_PATH="${discovered}"
+}
+
+backup_state() {
+    local ts backup_file
+
+    ts="$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "${BACKUP_DIR}"
+
+    backup_file="${BACKUP_DIR}/panel-access-state-${ts}.txt"
+
+    {
+        echo "# 3x-ui panel access switch backup"
+        echo "timestamp=${ts}"
+        echo "service_name=${SERVICE_NAME}"
+        echo "panel_port=${EFFECTIVE_PANEL_PORT}"
+        echo "panel_base_path=${PANEL_BASE_PATH}"
+        echo "panel_domain=${PANEL_DOMAIN}"
+        echo "sni_manager_config_path=${SNI_MANAGER_CONFIG_PATH}"
+        echo "sni_manager_port=${EFFECTIVE_SNI_MANAGER_PORT}"
+        echo
+        echo "[settings.listenIP]"
+        psql -U "${PG_USER}" -d "${PG_DB}" -h "${PG_HOST}" -p "${PG_PORT}" -c "SELECT key, value FROM settings WHERE key='listenIP' LIMIT 1;" 2>/dev/null || true
+        echo
+        echo "[settings.webPort]"
+        psql -U "${PG_USER}" -d "${PG_DB}" -h "${PG_HOST}" -p "${PG_PORT}" -c "SELECT key, value FROM settings WHERE key='webPort' LIMIT 1;" 2>/dev/null || true
+        echo
+        echo "[sni_manager.config.listen]"
+        if [[ -f "${SNI_MANAGER_CONFIG_PATH}" ]]; then
+            jq -r '{listen_host, listen_port}' "${SNI_MANAGER_CONFIG_PATH}" 2>/dev/null || true
+        else
+            echo "config_not_found"
+        fi
+        echo
+        echo "[ufw.status.numbered]"
+        if command -v ufw >/dev/null 2>&1; then
+            LC_ALL=C ufw status numbered || true
+        else
+            echo "ufw_not_installed"
+        fi
+    } > "${backup_file}"
+
+    log_info "Backup состояния сохранен: ${backup_file}"
+}
+
+persist_mode_state() {
+    local mode="$1"
+
+    mkdir -p "${STATE_DIR}"
+    {
+        echo "mode=${mode}"
+        echo "changed_at_epoch=$(date +%s)"
+        echo "changed_at_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "${STATE_FILE}"
+}
+
+apply_listen_ip() {
+    local ip="$1"
+
+    log_info "Применяю listenIP=${ip}"
+    "${XUI_BIN}" setting -listenIP "${ip}"
+}
+
+restart_and_verify_service() {
+    local service_state
+
+    systemctl restart "${SERVICE_NAME}"
+    service_state="$(systemctl is-active "${SERVICE_NAME}" || true)"
+
+    if [[ "${service_state}" != "active" ]]; then
+        log_error "Сервис ${SERVICE_NAME} не active после переключения"
+        journalctl -u "${SERVICE_NAME}" --no-pager -n 50 || true
+        exit 1
+    fi
+}
+
+restart_and_verify_sni_manager_service() {
+    local service_state
+
+    systemctl restart "${SNI_MANAGER_SERVICE_NAME}"
+    service_state="$(systemctl is-active "${SNI_MANAGER_SERVICE_NAME}" || true)"
+
+    if [[ "${service_state}" != "active" ]]; then
+        log_error "Сервис ${SNI_MANAGER_SERVICE_NAME} не active после переключения"
+        journalctl -u "${SNI_MANAGER_SERVICE_NAME}" --no-pager -n 50 || true
+        exit 1
+    fi
+}
+
+apply_sni_manager_listen_host() {
+    local ip="$1"
+    local tmp=""
+
+    if [[ ! -f "${SNI_MANAGER_CONFIG_PATH}" ]]; then
+        log_error "Не найден runtime-конфиг SNI Manager: ${SNI_MANAGER_CONFIG_PATH}"
+        exit 1
+    fi
+
+    tmp="$(mktemp)"
+    jq --arg host "${ip}" '.listen_host = $host' "${SNI_MANAGER_CONFIG_PATH}" > "${tmp}"
+    install -m 0640 -o root -g root "${tmp}" "${SNI_MANAGER_CONFIG_PATH}"
+    rm -f "${tmp}"
+
+    log_info "Применяю listen_host SNI Manager=${ip}"
+}
+
+healthcheck_local_panel() {
+    local panel_url status
+
+    if [[ -n "${EFFECTIVE_BASE_PATH}" ]]; then
+        panel_url="https://127.0.0.1:${EFFECTIVE_PANEL_PORT}/${EFFECTIVE_BASE_PATH}/"
+    else
+        panel_url="https://127.0.0.1:${EFFECTIVE_PANEL_PORT}/"
+    fi
+
+    sleep 3
+    status="$(curl -kfsS -o /dev/null -w '%{http_code}' \
+        --connect-timeout 5 --max-time 15 \
+        -H "Host: ${PANEL_DOMAIN}" \
+        "${panel_url}" 2>/dev/null || true)"
+
+    case "${status}" in
+        200|301|302|307|308|401|403|404)
+            log_info "Healthcheck OK: ${panel_url} (HTTP ${status})"
+            ;;
+        *)
+            log_error "Healthcheck не прошел: ${panel_url} (HTTP ${status:-000})"
+            exit 1
+            ;;
+    esac
+}
+
+healthcheck_local_sni_manager() {
+    local manager_url status
+
+    manager_url="https://127.0.0.1:${EFFECTIVE_SNI_MANAGER_PORT}/healthz"
+
+    sleep 3
+    status="$(curl -kfsS -o /dev/null -w '%{http_code}' \
+        --connect-timeout 5 --max-time 15 \
+        "${manager_url}" 2>/dev/null || true)"
+
+    case "${status}" in
+        200|301|302|307|308|401|403|404)
+            log_info "Healthcheck SNI Manager OK: ${manager_url} (HTTP ${status})"
+            ;;
+        *)
+            log_error "Healthcheck SNI Manager не прошел: ${manager_url} (HTTP ${status:-000})"
+            exit 1
+            ;;
+    esac
+}
+
+ensure_ufw_direct_rule() {
+    local ufw_state
+
+    if ! command -v ufw >/dev/null 2>&1; then
+        log_warn "ufw не найден; правило прямого доступа не применено"
+        return
+    fi
+
+    ufw_state="$(LC_ALL=C ufw status | head -n 1 || true)"
+    if printf '%s' "${ufw_state}" | grep -qi "inactive"; then
+        log_warn "ufw inactive; правило прямого доступа не требуется"
+        return
+    fi
+
+    ufw allow "${EFFECTIVE_PANEL_PORT}/tcp" comment "${UFW_DIRECT_RULE_COMMENT}" >/dev/null
+    log_info "UFW: разрешен прямой доступ к порту панели ${EFFECTIVE_PANEL_PORT}/tcp"
+}
+
+remove_ufw_direct_rule() {
+    if ! command -v ufw >/dev/null 2>&1; then
+        return
+    fi
+
+    ufw --force delete allow "${EFFECTIVE_PANEL_PORT}/tcp" comment "${UFW_DIRECT_RULE_COMMENT}" >/dev/null || true
+    log_info "UFW: правило прямого доступа к порту панели ${EFFECTIVE_PANEL_PORT}/tcp удалено (если существовало)"
+}
+
+ensure_ufw_sni_direct_rule() {
+    local ufw_state
+
+    if ! command -v ufw >/dev/null 2>&1; then
+        log_warn "ufw не найден; правило прямого доступа SNI Manager не применено"
+        return
+    fi
+
+    ufw_state="$(LC_ALL=C ufw status | head -n 1 || true)"
+    if printf '%s' "${ufw_state}" | grep -qi "inactive"; then
+        log_warn "ufw inactive; правило прямого доступа SNI Manager не требуется"
+        return
+    fi
+
+    ufw allow "${EFFECTIVE_SNI_MANAGER_PORT}/tcp" comment "${UFW_SNI_DIRECT_RULE_COMMENT}" >/dev/null
+    log_info "UFW: разрешен прямой доступ к порту SNI Manager ${EFFECTIVE_SNI_MANAGER_PORT}/tcp"
+}
+
+remove_ufw_sni_direct_rule() {
+    if ! command -v ufw >/dev/null 2>&1; then
+        return
+    fi
+
+    ufw --force delete allow "${EFFECTIVE_SNI_MANAGER_PORT}/tcp" comment "${UFW_SNI_DIRECT_RULE_COMMENT}" >/dev/null || true
+    log_info "UFW: правило прямого доступа к порту SNI Manager ${EFFECTIVE_SNI_MANAGER_PORT}/tcp удалено (если существовало)"
+}
+
+apply_mode_tunnel() {
+    backup_state
+    apply_listen_ip "${TUNNEL_LISTEN_IP}"
+    restart_and_verify_service
+    remove_ufw_direct_rule
+    apply_sni_manager_listen_host "${SNI_MANAGER_TUNNEL_LISTEN_IP}"
+    restart_and_verify_sni_manager_service
+    remove_ufw_sni_direct_rule
+    healthcheck_local_panel
+    healthcheck_local_sni_manager
+    persist_mode_state "tunnel"
+
+    echo
+    echo "Режим успешно применен: Tunnel mode"
+    echo "Панель слушает: ${TUNNEL_LISTEN_IP}:${EFFECTIVE_PANEL_PORT}"
+    echo "SNI Manager слушает: ${SNI_MANAGER_TUNNEL_LISTEN_IP}:${EFFECTIVE_SNI_MANAGER_PORT}"
+    echo "Для доступа с локальной машины используй: ./scripts/tunnel.sh start"
+}
+
+apply_mode_direct() {
+    backup_state
+    apply_listen_ip "${DIRECT_LISTEN_IP}"
+    restart_and_verify_service
+    ensure_ufw_direct_rule
+    apply_sni_manager_listen_host "${SNI_MANAGER_DIRECT_LISTEN_IP}"
+    restart_and_verify_sni_manager_service
+    ensure_ufw_sni_direct_rule
+    healthcheck_local_panel
+    healthcheck_local_sni_manager
+    persist_mode_state "direct"
+
+    echo
+    echo "Режим успешно применен: Direct mode"
+    echo "Панель слушает: ${DIRECT_LISTEN_IP}:${EFFECTIVE_PANEL_PORT}"
+    echo "Ссылка панели (direct): $(panel_url)"
+    echo "SNI Manager слушает: ${SNI_MANAGER_DIRECT_LISTEN_IP}:${EFFECTIVE_SNI_MANAGER_PORT}"
+    echo "Ссылка SNI Manager (direct): $(sni_manager_url)"
+}
+
+choose_mode_interactively() {
+    local current_mode choice
+
+    current_mode="$(detect_current_mode)"
+
+    echo
+    echo "Текущий режим панели: $(describe_mode "${current_mode}")"
+    if [[ "${current_mode}" == "direct" ]]; then
+        echo "Ссылка панели (direct): $(panel_url)"
+        echo "Ссылка SNI Manager (direct): $(sni_manager_url)"
+    fi
+    print_guard_settings
+    echo
+    echo "Выбери режим доступа:"
+    echo "1. Direct mode"
+    echo "2. Tunnel mode"
+    echo "3. Configure auto-rollback timeout"
+    echo "4. Exit"
+
+    while true; do
+        read -r -p "Ввод [1/2/3/4]: " choice
+        case "${choice}" in
+            1)
+                CLI_MODE="direct"
+                return
+                ;;
+            2)
+                CLI_MODE="tunnel"
+                return
+                ;;
+            3)
+                configure_guard_timeout_interactively
+                echo
+                echo "Выбери режим доступа:"
+                echo "1. Direct mode"
+                echo "2. Tunnel mode"
+                echo "3. Configure auto-rollback timeout"
+                echo "4. Exit"
+                ;;
+            4)
+                echo "Выход без изменений."
+                exit 0
+                ;;
+            *)
+                echo "Неверный выбор, введи 1, 2, 3 или 4."
+                ;;
+        esac
+    done
+}
+
+main() {
+    ensure_root
+    export PGPASSWORD="{{ xui_db_password }}"
+    parse_args "$@"
+
+    require_cmd psql
+    require_cmd curl
+    require_cmd systemctl
+    require_cmd jq
+
+    if [[ ! -x "${XUI_BIN}" ]]; then
+        log_error "Не найден исполняемый файл 3x-ui: ${XUI_BIN}"
+        exit 1
+    fi
+
+    if ! psql -U "${PG_USER}" -d "${PG_DB}" -h "${PG_HOST}" -p "${PG_PORT}" -c "SELECT 1;" >/dev/null 2>&1; then
+        log_error "Не удалось подключиться к PostgreSQL: ${PG_HOST}:${PG_PORT}/${PG_DB}"
+        exit 1
+    fi
+
+    resolve_effective_panel_port
+    resolve_effective_sni_manager_port
+    resolve_effective_base_path
+
+    if [[ ${CLI_PRINT_CURRENT_MODE} -eq 1 ]]; then
+        detect_current_mode
+        exit 0
+    fi
+
+    if [[ -z "${CLI_MODE}" ]]; then
+        choose_mode_interactively
+    fi
+
+    case "${CLI_MODE}" in
+        tunnel)
+            apply_mode_tunnel
+            ;;
+        direct)
+            apply_mode_direct
+            ;;
+    esac
+}
+
+main "$@"

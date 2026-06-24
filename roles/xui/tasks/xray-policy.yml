@@ -1,0 +1,68 @@
+---
+- name: Применить настройки XRAY (policy + DNS) в template config БД 3x-ui
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    PG_USER="{{ xui_db_user }}"
+    PG_DB="{{ xui_db_name }}"
+    PG_HOST="{{ xui_db_host }}"
+    PG_PORT="{{ xui_db_port }}"
+    export PGPASSWORD="{{ xui_db_password }}"
+
+    current_template="$(psql -U "${PG_USER}" -d "${PG_DB}" -h "${PG_HOST}" -p "${PG_PORT}" -tA -c "SELECT COALESCE(value, '{}') FROM settings WHERE key = 'xrayTemplateConfig';")"
+    if [ -z "${current_template}" ] || [ "${current_template}" = "{}" ]; then
+      echo "skipped: no xrayTemplateConfig found"
+      exit 0
+    fi
+
+    changes=""
+    updated="${current_template}"
+
+    current_conn_idle="$(echo "${updated}" | jq -r '.policy.levels."0".connIdle // "unset"')"
+    desired_conn_idle="{{ xui_xray_policy_conn_idle }}"
+    if [ "${current_conn_idle}" != "${desired_conn_idle}" ]; then
+      updated="$(echo "${updated}" | jq --argjson v "${desired_conn_idle}" '.policy.levels."0".connIdle = $v')"
+      changes="${changes} connIdle:${current_conn_idle}->${desired_conn_idle}"
+    fi
+
+    current_handshake="$(echo "${updated}" | jq -r '.policy.levels."0".handshake // "unset"')"
+    desired_handshake="{{ xui_xray_policy_handshake }}"
+    if [ "${current_handshake}" != "${desired_handshake}" ]; then
+      updated="$(echo "${updated}" | jq --argjson v "${desired_handshake}" '.policy.levels."0".handshake = $v')"
+      changes="${changes} handshake:${current_handshake}->${desired_handshake}"
+    fi
+
+    current_online="$(echo "${updated}" | jq -r '.policy.levels."0".statsUserOnline // "unset"')"
+    if [ "${current_online}" != "true" ]; then
+      updated="$(echo "${updated}" | jq '.policy.levels."0".statsUserOnline = true')"
+      changes="${changes} statsUserOnline:${current_online}->true"
+    fi
+
+    current_strategy="$(echo "${updated}" | jq -r '.dns.queryStrategy // "unset"')"
+    desired_strategy="{{ xui_xray_dns_query_strategy }}"
+    if [ "${current_strategy}" != "${desired_strategy}" ]; then
+      updated="$(echo "${updated}" | jq --arg v "${desired_strategy}" '.dns.queryStrategy = $v')"
+      changes="${changes} queryStrategy:${current_strategy}->${desired_strategy}"
+    fi
+
+    current_servers="$(echo "${updated}" | jq -c '.dns.servers')"
+    desired_servers='{{ xui_xray_dns_servers | to_json }}'
+    if [ "${current_servers}" != "${desired_servers}" ]; then
+      updated="$(echo "${updated}" | jq --argjson v "${desired_servers}" '.dns.servers = $v')"
+      changes="${changes} dns_servers"
+    fi
+
+    if [ -z "${changes}" ]; then
+      echo "unchanged"
+      exit 0
+    fi
+
+    psql -U "${PG_USER}" -d "${PG_DB}" -h "${PG_HOST}" -p "${PG_PORT}" \
+      -c "UPDATE settings SET value = '${updated}' WHERE key = 'xrayTemplateConfig';"
+
+    echo "updated:${changes}"
+  args:
+    executable: /bin/bash
+  register: xui_template_result
+  changed_when: "'updated:' in xui_template_result.stdout"
+  notify: Restart x-ui

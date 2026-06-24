@@ -1,0 +1,9 @@
+[x-ui-admin]
+enabled = true
+backend = systemd
+journalmatch = _SYSTEMD_UNIT=x-ui.service
+filter = x-ui-admin
+port = {{ xui_panel_port }}
+findtime = {{ xui_fail2ban_findtime }}
+bantime = {{ xui_fail2ban_bantime }}
+maxretry = {{ xui_fail2ban_maxretry }}

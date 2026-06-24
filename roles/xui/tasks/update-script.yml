@@ -1,0 +1,64 @@
+---
+- name: Установить server-side скрипт ручного обновления 3x-ui
+  ansible.builtin.template:
+    src: update-3x-ui-server.sh.j2
+    dest: "{{ xui_server_update_script_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Установить server-side скрипт восстановления 3x-ui/SNI Manager
+  ansible.builtin.template:
+    src: restore-3x-ui-server.sh.j2
+    dest: "{{ xui_server_restore_script_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Установить server-side скрипт переключения режима доступа панели 3x-ui
+  ansible.builtin.template:
+    src: 3xui-panel-access-switch.sh.j2
+    dest: "{{ xui_server_panel_access_script_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Создать каталог state для режима доступа панели
+  ansible.builtin.file:
+    path: "{{ xui_panel_access_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Установить server-side guard-скрипт режима доступа панели 3x-ui
+  ansible.builtin.template:
+    src: 3xui-panel-access-guard.sh.j2
+    dest: "{{ xui_server_panel_access_guard_script_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Установить systemd service guard-проверки режима доступа панели
+  ansible.builtin.template:
+    src: 3xui-panel-access-guard.service.j2
+    dest: /etc/systemd/system/3xui-panel-access-guard.service
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Установить systemd timer guard-проверки режима доступа панели
+  ansible.builtin.template:
+    src: 3xui-panel-access-guard.timer.j2
+    dest: /etc/systemd/system/3xui-panel-access-guard.timer
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Включить и запустить timer guard-проверки режима доступа панели
+  ansible.builtin.systemd:
+    name: 3xui-panel-access-guard.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: not ansible_check_mode

@@ -1,0 +1,12 @@
+Unattended-Upgrade::Origins-Pattern {
+        "origin=${distro_id},codename=${distro_codename},label=${distro_id}";
+        "origin=${distro_id},codename=${distro_codename}-security,label=${distro_id}-Security";
+        "origin=${distro_id},codename=${distro_codename},label=${distro_id}-Security";
+};
+
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+Unattended-Upgrade::MinimalSteps "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::MailOnlyOnError "true";
+Unattended-Upgrade::SyslogEnable "true";

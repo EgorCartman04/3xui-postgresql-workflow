@@ -1,0 +1,143 @@
+---
+- name: Установка и hardening 3x-ui с PostgreSQL на production-сервере
+  hosts: xui_servers
+  gather_facts: true
+
+  pre_tasks:
+    - name: Проверить поддерживаемое семейство ОС
+      ansible.builtin.assert:
+        that:
+          - ansible_facts["os_family"] == "Debian"
+          - ansible_facts["distribution"] in ["Debian", "Ubuntu"]
+        fail_msg: "Этот playbook рассчитан на Debian/Ubuntu серверы."
+      tags: [always]
+
+    - name: Проверить обязательные секреты панели
+      ansible.builtin.assert:
+        that:
+          - xui_admin_username | length > 0
+          - xui_admin_password | length >= 16
+          - xui_panel_base_path | length >= 16
+          - xui_db_password | length > 0
+        fail_msg: "Нужно передать XUI_ADMIN_USERNAME, XUI_ADMIN_PASSWORD, XUI_PANEL_BASE_PATH и XUI_DB_PASSWORD через env vars или GitHub Secrets."
+      tags: [always]
+
+    - name: Проверить доступность публичного ключа деплоя
+      ansible.builtin.assert:
+        that:
+          - controller_ssh_public_key | length > 0
+        fail_msg: "Не найден публичный ключ для ansible_deploy_key."
+      tags: [always]
+
+    - name: Проверить резолв домена на IPv4 до начала деплоя
+      ansible.builtin.command: "getent ahostsv4 {{ xui_domain }}"
+      register: xui_predeploy_domain_resolution
+      changed_when: false
+      tags: [always]
+
+    - name: Сформировать список IPv4-адресов домена
+      ansible.builtin.set_fact:
+        xui_resolved_ipv4s: >-
+          {{
+            xui_predeploy_domain_resolution.stdout_lines
+            | map('split')
+            | map('first')
+            | unique
+            | list
+          }}
+      tags: [always]
+
+    - name: Подтвердить, что DNS-имя указывает только на целевой сервер
+      ansible.builtin.assert:
+        that:
+          - xui_server_ip in xui_resolved_ipv4s
+          - (xui_resolved_ipv4s | difference([xui_server_ip]) | length) == 0
+        fail_msg: >-
+          DNS-проверка провалена: {{ xui_domain }} должен резолвиться только в {{ xui_server_ip }},
+          фактически получены {{ xui_resolved_ipv4s | join(', ') }}.
+      tags: [always]
+
+  tasks:
+    - name: Подключить роль system
+      ansible.builtin.import_role:
+        name: system
+      tags: [update]
+
+    - name: Подключить роль postgresql
+      ansible.builtin.import_role:
+        name: postgresql
+      tags: [update]
+
+    - name: Подключить роль xui
+      ansible.builtin.import_role:
+        name: xui
+      tags: [update]
+
+    - name: Подключить роль fail2ban
+      ansible.builtin.import_role:
+        name: fail2ban
+      tags: [update]
+
+    - name: Подключить роль sni_manager
+      ansible.builtin.import_role:
+        name: sni_manager
+      tags: [update]
+
+  post_tasks:
+    - name: Применить отложенные handlers перед post-check
+      ansible.builtin.meta: flush_handlers
+      tags: [update, network]
+
+    - name: Проверить ключевые sysctl-параметры после деплоя
+      ansible.builtin.command: "sysctl -n {{ item }}"
+      register: xui_postcheck_sysctl_values
+      changed_when: false
+      loop:
+        - net.core.default_qdisc
+        - net.ipv4.tcp_congestion_control
+        - net.core.somaxconn
+        - net.ipv4.tcp_max_syn_backlog
+        - net.core.netdev_max_backlog
+        - net.ipv4.tcp_mtu_probing
+        - net.ipv4.tcp_fastopen
+      tags: [update, network]
+
+    - name: Подтвердить sysctl
+      ansible.builtin.assert:
+        that:
+          - (item.stdout | trim) == (xui_sysctl[item.item] | string)
+        fail_msg: "sysctl drift: {{ item.item }}={{ item.stdout | trim }}, expected={{ xui_sysctl[item.item] | string }}."
+      loop: "{{ xui_postcheck_sysctl_values.results }}"
+      tags: [update, network]
+
+    - name: Проверить, что x-ui активен
+      ansible.builtin.command: systemctl is-active x-ui
+      register: xui_postcheck_service_state
+      changed_when: false
+      tags: [update]
+
+    - name: Подтвердить активное состояние x-ui
+      ansible.builtin.assert:
+        that:
+          - (xui_postcheck_service_state.stdout | trim) == 'active'
+        fail_msg: "Сервис x-ui не активен после деплоя."
+      tags: [update]
+
+    - name: Проверить статус fail2ban
+      ansible.builtin.command: fail2ban-client status
+      register: xui_fail2ban_status
+      changed_when: false
+      tags: [update]
+
+    - name: Подтвердить работу fail2ban
+      ansible.builtin.assert:
+        that:
+          - "'Jail list' in xui_fail2ban_status.stdout"
+        fail_msg: "fail2ban не работает после деплоя."
+      tags: [update]
+
+    - name: Проверить доступность PostgreSQL
+      ansible.builtin.command: pg_isready -U {{ xui_db_user }} -d {{ xui_db_name }} -h {{ xui_db_host }}
+      register: xui_pg_isready
+      changed_when: false
+      tags: [update]

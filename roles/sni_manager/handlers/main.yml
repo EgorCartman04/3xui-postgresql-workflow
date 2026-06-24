@@ -1,0 +1,9 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart 3x-ui manager
+  ansible.builtin.service:
+    name: "{{ xui_manager_service_name }}"
+    state: restarted

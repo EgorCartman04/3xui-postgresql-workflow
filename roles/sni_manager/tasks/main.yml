@@ -1,0 +1,260 @@
+---
+- name: Создать каталоги менеджера SNI
+  ansible.builtin.shell: |
+    #!/bin/bash
+    set -euo pipefail
+    mkdir -p "{{ item.path }}"
+    chmod "{{ item.mode }}" "{{ item.path }}"
+    chown root:root "{{ item.path }}"
+  loop:
+    - { path: "{{ xui_manager_install_dir }}", mode: "0755" }
+    - { path: "{{ xui_manager_config_dir }}", mode: "0750" }
+    - { path: "{{ xui_manager_state_dir }}", mode: "0750" }
+    - { path: "{{ xui_manager_log_dir }}", mode: "0750" }
+    - { path: "/etc/systemd/system/{{ xui_manager_rotation_timer_name }}.d", mode: "0755" }
+  changed_when: false
+  args:
+    executable: /bin/bash
+
+- name: Определить каталог rollout backup менеджера SNI
+  ansible.builtin.set_fact:
+    xui_manager_rollout_backup_dir: "{{ xui_backup_dir }}/sni-manager-rollout-{{ ansible_date_time.iso8601_basic_short }}"
+
+- name: Создать каталог rollout backup менеджера SNI
+  ansible.builtin.shell: |
+    #!/bin/bash
+    set -euo pipefail
+    mkdir -p "{{ xui_manager_rollout_backup_dir }}"
+    chmod 0700 "{{ xui_manager_rollout_backup_dir }}"
+    chown root:root "{{ xui_manager_rollout_backup_dir }}"
+  changed_when: false
+  args:
+    executable: /bin/bash
+
+- name: Сохранить manifest rollout backup менеджера SNI
+  ansible.builtin.copy:
+    dest: "{{ xui_manager_rollout_backup_dir }}/manifest.json"
+    content: |
+      {{ {
+        'created_at': ansible_date_time.iso8601,
+        'xui_db_path': xui_db_path,
+        'xui_manager_config_path': xui_manager_config_path,
+        'xui_manager_state_path': xui_manager_state_path,
+        'xui_manager_sni_list_path': xui_manager_sni_list_path
+      } | to_nice_json }}
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Сохранить backup x-ui.db перед обновлением менеджера SNI
+  ansible.builtin.copy:
+    src: "{{ xui_db_path }}"
+    dest: "{{ xui_manager_rollout_backup_dir }}/x-ui.db"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Проверить наличие runtime-артефактов менеджера для rollout backup
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ xui_manager_config_path }}"
+    - "{{ xui_manager_state_path }}"
+    - "{{ xui_manager_sni_list_path }}"
+  register: xui_manager_runtime_artifacts_stat
+
+- name: Сохранить runtime-артефакты менеджера в rollout backup
+  ansible.builtin.copy:
+    src: "{{ item.stat.path }}"
+    dest: "{{ xui_manager_rollout_backup_dir }}/{{ item.stat.path | basename }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ xui_manager_runtime_artifacts_stat.results }}"
+  when: item.stat.exists
+
+- name: Проверить наличие runtime-конфига менеджера
+  ansible.builtin.stat:
+    path: "{{ xui_manager_config_path }}"
+  register: xui_manager_config_stat
+
+- name: Проверить наличие legacy runtime override fail2ban
+  ansible.builtin.stat:
+    path: /etc/fail2ban/jail.d/99-3x-ui-manager.local
+  register: xui_manager_legacy_fail2ban_override_stat
+
+- name: Установить seed-список Reality SNI без перезаписи runtime-изменений
+  ansible.builtin.copy:
+    src: "{{ xui_manager_seed_sni_file }}"
+    dest: "{{ xui_manager_sni_list_path }}"
+    owner: root
+    group: root
+    mode: "0640"
+    force: false
+
+- name: Создать пустой runtime override fail2ban при первом деплое
+  ansible.builtin.copy:
+    dest: "{{ xui_manager_fail2ban_override_path }}"
+    content: |
+      # Этот файл управляется локальным UI 3x-ui-manager.
+      # Базовые jail-настройки остаются под контролем основного Ansible deploy.
+    owner: root
+    group: root
+    mode: "0644"
+    force: false
+  register: xui_manager_fail2ban_override_bootstrap
+
+- name: Мигрировать legacy runtime override fail2ban в поздний override-файл
+  ansible.builtin.copy:
+    src: /etc/fail2ban/jail.d/99-3x-ui-manager.local
+    dest: "{{ xui_manager_fail2ban_override_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+    force: true
+  when:
+    - xui_manager_legacy_fail2ban_override_stat.stat.exists
+    - xui_manager_fail2ban_override_path != '/etc/fail2ban/jail.d/99-3x-ui-manager.local'
+  register: xui_manager_fail2ban_override_migration
+
+- name: Прочитать runtime-конфиг менеджера для точечной миграции
+  ansible.builtin.slurp:
+    src: "{{ xui_manager_config_path }}"
+  register: xui_manager_runtime_config_raw
+  when: xui_manager_config_stat.stat.exists
+
+- name: Обновить путь runtime override fail2ban в существующем config.json
+  ansible.builtin.copy:
+    dest: "{{ xui_manager_config_path }}"
+    content: "{{ (xui_manager_runtime_config_raw.content | b64decode | from_json | combine({'fail2ban_override_path': xui_manager_fail2ban_override_path, 'slots': {'ports': xui_manager_slot_ports, 'auto_provision': xui_manager_slot_auto_provision}, 'tls': {'enabled': true, 'cert_path': xui_panel_cert_dir ~ '/fullchain.pem', 'key_path': xui_panel_cert_dir ~ '/privkey.pem'}, 'auth': {'realm': '3x-ui SNI Manager', 'source': 'x-ui-users-db'}}, recursive=True)) | to_nice_json }}\n"
+    owner: root
+    group: root
+    mode: "0640"
+  when: xui_manager_config_stat.stat.exists
+
+- name: Удалить legacy runtime override fail2ban после миграции
+  ansible.builtin.file:
+    path: /etc/fail2ban/jail.d/99-3x-ui-manager.local
+    state: absent
+  when:
+    - xui_manager_legacy_fail2ban_override_stat.stat.exists
+    - xui_manager_fail2ban_override_path != '/etc/fail2ban/jail.d/99-3x-ui-manager.local'
+  register: xui_manager_fail2ban_override_cleanup
+
+- name: Перезапустить fail2ban после изменения runtime override
+  ansible.builtin.service:
+    name: fail2ban
+    state: restarted
+  when:
+    - (xui_manager_fail2ban_override_bootstrap is defined and xui_manager_fail2ban_override_bootstrap.changed) or
+      (xui_manager_fail2ban_override_migration is defined and xui_manager_fail2ban_override_migration.changed) or
+      (xui_manager_fail2ban_override_cleanup is defined and xui_manager_fail2ban_override_cleanup.changed)
+
+- name: Инициализировать runtime-конфиг менеджера только при первом деплое
+  ansible.builtin.template:
+    src: 3x-ui-manager-config.json.j2
+    dest: "{{ xui_manager_config_path }}"
+    owner: root
+    group: root
+    mode: "0640"
+  when: not xui_manager_config_stat.stat.exists
+
+- name: Установить backend менеджера SNI и fail2ban
+  ansible.builtin.template:
+    src: 3x-ui-manager.py.j2
+    dest: "{{ xui_manager_install_dir }}/manager.py"
+    owner: root
+    group: root
+    mode: "0750"
+  notify: Restart 3x-ui manager
+
+- name: Установить systemd service локального UI менеджера
+  ansible.builtin.template:
+    src: 3x-ui-manager.service.j2
+    dest: "/etc/systemd/system/{{ xui_manager_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart 3x-ui manager
+
+- name: Установить systemd service ротации Reality SNI
+  ansible.builtin.template:
+    src: 3x-ui-manager-rotation.service.j2
+    dest: "/etc/systemd/system/{{ xui_manager_rotation_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Установить systemd timer ротации Reality SNI
+  ansible.builtin.template:
+    src: 3x-ui-manager-rotation.timer.j2
+    dest: "/etc/systemd/system/{{ xui_manager_rotation_timer_name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Сохранить operational note для менеджера
+  ansible.builtin.template:
+    src: 3x-ui-manager-access.txt.j2
+    dest: /root/3x-ui-manager-access.txt
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Синхронно применить handlers менеджера до валидации
+  ansible.builtin.meta: flush_handlers
+
+- name: Включить и запустить локальный UI менеджера
+  ansible.builtin.systemd:
+    name: "{{ xui_manager_service_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Дождаться инициализации 3x-ui-manager и x-ui перед проверкой
+  ansible.builtin.pause:
+    seconds: 3
+  delegate_to: "{{ inventory_hostname }}"
+
+- name: Применить стартовое состояние timer ротации
+  ansible.builtin.systemd:
+    name: "{{ xui_manager_rotation_timer_name }}"
+    enabled: "{{ xui_manager_rotation_enabled }}"
+    state: "{{ 'started' if xui_manager_rotation_enabled else 'stopped' }}"
+    daemon_reload: true
+  failed_when: false
+
+- name: Проверить доступность локального UI менеджера
+  ansible.builtin.shell: |
+    set -e
+    attempt=0
+    max_attempts=30
+    while [ $attempt -lt $max_attempts ]; do
+      attempt=$((attempt + 1))
+      if curl -kfs --max-time 2 https://127.0.0.1:{{ xui_manager_tunnel_local_port }}/healthz > /dev/null 2>&1; then
+        echo "✓ healthz OK (попытка $attempt)"
+        exit 0
+      fi
+      echo "⏳ healthz недоступен (попытка $attempt/$max_attempts), ожидание 2 сек..."
+      sleep 2
+    done
+    echo "✗ healthz не отвечает после $max_attempts попыток"
+    echo ""
+    echo "=== Статус сервиса ==="
+    systemctl status 3x-ui-manager || true
+    echo ""
+    echo "=== Последние логи journalctl ==="
+    journalctl -u 3x-ui-manager -n 50 --no-pager || true
+    echo ""
+    echo "=== Проверка процесса ==="
+    ps aux | grep -E 'python3|manager' | grep -v grep || echo "Процесс не найден"
+    exit 1
+  delegate_to: "{{ inventory_hostname }}"
+  register: healthz_check

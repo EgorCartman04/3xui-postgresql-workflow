@@ -1,0 +1,10 @@
+[Unit]
+Description=Периодическая синхронизация UFW с inbound-портами 3x-ui
+
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec={{ xui_port_sync_interval }}
+Persistent=true
+
+[Install]
+WantedBy=timers.target

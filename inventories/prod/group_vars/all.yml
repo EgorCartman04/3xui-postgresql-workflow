@@ -1,0 +1,181 @@
+---
+ansible_user: "{{ lookup('env', 'ANSIBLE_REMOTE_USER') | default('root', true) }}"
+ansible_port: "{{ (lookup('env', 'ANSIBLE_REMOTE_PORT') | default('22', true)) | int }}"
+ansible_become: true
+ansible_python_interpreter: /usr/bin/python3
+
+controller_ssh_private_key_file: "{{ lookup('env', 'ANSIBLE_DEPLOY_KEY_FILE') | default(inventory_dir + '/../../.secrets/ssh/ansible_deploy_key', true) }}"
+ansible_ssh_private_key_file: "{{ controller_ssh_private_key_file }}"
+controller_ssh_public_key_file: "{{ lookup('env', 'ANSIBLE_DEPLOY_KEY_PUBLIC_FILE') | default(controller_ssh_private_key_file + '.pub', true) }}"
+controller_ssh_public_key: "{{ lookup('file', controller_ssh_public_key_file, errors='ignore') | trim }}"
+
+xui_server_ip: "2.26.230.90"
+xui_domain: "adv.randomain.space"
+xui_version: "v3.3.1"
+xui_force_downgrade: false
+xui_install_dir: "/usr/local/x-ui"
+xui_service_name: "x-ui"
+xui_limit_nofile: 512000
+
+# PostgreSQL
+xui_db_type: "postgres"
+xui_db_host: "127.0.0.1"
+xui_db_port: 5432
+xui_db_name: "xui"
+xui_db_user: "xui"
+xui_db_password: "{{ lookup('env', 'XUI_DB_PASSWORD') }}"
+xui_db_path: "/etc/x-ui/x-ui.db"
+
+xui_admin_username: "{{ lookup('env', 'XUI_ADMIN_USERNAME') }}"
+xui_admin_password: "{{ lookup('env', 'XUI_ADMIN_PASSWORD') }}"
+xui_panel_base_path: "{{ lookup('env', 'XUI_PANEL_BASE_PATH') }}"
+xui_panel_port: "{{ (lookup('env', 'XUI_PANEL_PORT') | default('24443', true)) | int }}"
+xui_panel_listen_ip: "127.0.0.1"
+xui_panel_cert_dir: "/root/cert/{{ xui_domain }}"
+xui_panel_web_domain: ""
+xui_panel_public_url: "https://{{ xui_domain }}:{{ xui_panel_port }}/{{ xui_panel_base_path }}/"
+xui_panel_tunnel_local_port: "{{ xui_panel_port }}"
+xui_panel_tunnel_url: "https://127.0.0.1:{{ xui_panel_tunnel_local_port }}/{{ xui_panel_base_path }}/"
+xui_sshd_permit_open_targets:
+  - "127.0.0.1:{{ xui_panel_port }}"
+  - "127.0.0.1:{{ xui_manager_port }}"
+xui_sub_listen_ip: ""
+xui_sub_port: 5010
+xui_sub_public_url: "https://{{ xui_domain }}:{{ xui_sub_port }}/"
+
+xui_fail2ban_bantime: "24h"
+xui_fail2ban_findtime: "15m"
+xui_fail2ban_maxretry: 5
+xui_sshd_fail2ban_bantime: "3h"
+xui_sshd_fail2ban_findtime: "10m"
+xui_sshd_fail2ban_maxretry: 5
+xui_recidive_bantime: "15d"
+xui_recidive_findtime: "1d"
+xui_recidive_maxretry: 3
+
+xui_backup_dir: "/var/backups/3x-ui"
+xui_backup_retention_days: 14
+xui_server_update_script_path: "/usr/local/sbin/3xui-update-server.sh"
+xui_server_restore_script_path: "/usr/local/sbin/3xui-restore-server.sh"
+xui_server_panel_access_script_path: "/usr/local/sbin/3xui-panel-access-switch.sh"
+xui_server_panel_access_guard_script_path: "/usr/local/sbin/3xui-panel-access-guard.sh"
+xui_panel_direct_listen_ip: "0.0.0.0"
+xui_panel_access_state_dir: "/var/lib/3x-ui-panel-access"
+xui_panel_direct_max_seconds: 1800
+xui_panel_access_guard_interval: "5m"
+xui_port_sync_state_dir: "/var/lib/3x-ui-port-sync"
+xui_port_sync_lock_file: "/run/3x-ui-port-sync.lock"
+xui_port_sync_lock_wait_seconds: 15
+xui_port_sync_comment: "3x-ui-managed"
+xui_port_sync_interval: "2m"
+xui_iperf3_service_name: "3x-ui-iperf3"
+xui_iperf3_listen_ip: "127.0.0.1"
+xui_iperf3_port: 5201
+
+xui_manager_install_dir: "/opt/3x-ui-manager"
+xui_manager_config_dir: "/etc/3x-ui-manager"
+xui_manager_state_dir: "/var/lib/3x-ui-manager"
+xui_manager_log_dir: "/var/log/3x-ui-manager"
+xui_manager_config_path: "{{ xui_manager_config_dir }}/config.json"
+xui_manager_state_path: "{{ xui_manager_state_dir }}/state.json"
+xui_manager_sni_list_path: "{{ xui_manager_config_dir }}/reality-sni.txt"
+xui_manager_seed_sni_file: "{{ inventory_dir }}/../../data/sni/reality-sni.txt"
+xui_manager_fail2ban_db_path: "/var/lib/fail2ban/fail2ban.sqlite3"
+xui_manager_fail2ban_override_path: "/etc/fail2ban/jail.d/zz-3x-ui-manager.local"
+xui_manager_service_name: "3x-ui-manager"
+xui_manager_rotation_service_name: "3x-ui-manager-rotation"
+xui_manager_rotation_timer_name: "3x-ui-manager-rotation.timer"
+xui_manager_listen_ip: "127.0.0.1"
+xui_manager_port: 24880
+xui_manager_tunnel_local_port: "{{ xui_manager_port }}"
+xui_manager_tunnel_url: "https://127.0.0.1:{{ xui_manager_tunnel_local_port }}/"
+xui_manager_rotation_enabled: false
+xui_manager_rotation_on_calendar: "*-*-* 03:30:00"
+xui_manager_rotation_window_size: 1
+xui_manager_slot_ports:
+  - 443
+  - 8443
+  - 9443
+xui_manager_slot_auto_provision: true
+xui_manager_rotation_log_file: "{{ xui_manager_log_dir }}/rotation.log"
+xui_manager_runtime_log_file: "{{ xui_manager_log_dir }}/server.log"
+
+xui_system_packages:
+  - ca-certificates
+  - chrony
+  - curl
+  - cron
+  - fail2ban
+  - jq
+  - needrestart
+  - nftables
+  - openssl
+  - python3-bcrypt
+  - socat
+  - sqlite3
+  - ufw
+  - unattended-upgrades
+  - apt-listchanges
+
+xui_firewall_allowed_tcp_ports:
+  - 22
+  - 80
+  - "{{ xui_sub_port }}"
+
+xui_sysctl:
+  fs.protected_hardlinks: "1"
+  fs.protected_symlinks: "1"
+  kernel.dmesg_restrict: "1"
+  kernel.kptr_restrict: "2"
+  net.core.default_qdisc: "fq"
+  net.core.netdev_max_backlog: "16384"
+  net.core.rmem_default: "1048576"
+  net.core.rmem_max: "67108864"
+  net.core.somaxconn: "65535"
+  net.core.wmem_default: "1048576"
+  net.core.wmem_max: "67108864"
+  net.ipv4.conf.all.accept_redirects: "0"
+  net.ipv4.conf.all.accept_source_route: "0"
+  net.ipv4.conf.all.rp_filter: "1"
+  net.ipv4.conf.all.send_redirects: "0"
+  net.ipv4.conf.default.accept_redirects: "0"
+  net.ipv4.conf.default.accept_source_route: "0"
+  net.ipv4.conf.default.rp_filter: "1"
+  net.ipv4.conf.default.send_redirects: "0"
+  net.ipv4.tcp_congestion_control: "bbr"
+  net.ipv4.tcp_fin_timeout: "15"
+  net.ipv4.tcp_fastopen: "3"
+  net.ipv4.tcp_keepalive_intvl: "30"
+  net.ipv4.tcp_keepalive_probes: "5"
+  net.ipv4.tcp_keepalive_time: "1200"
+  net.ipv4.tcp_max_syn_backlog: "32768"
+  net.ipv4.tcp_mtu_probing: "1"
+  net.ipv4.tcp_rmem: "4096 87380 33554432"
+  net.ipv4.tcp_slow_start_after_idle: "0"
+  net.ipv4.tcp_syncookies: "1"
+  net.ipv4.tcp_tw_reuse: "1"
+  net.ipv4.tcp_wmem: "4096 65536 33554432"
+  net.ipv6.conf.all.accept_redirects: "0"
+  net.ipv6.conf.default.accept_redirects: "0"
+
+xui_conntrack_sysctl:
+  net.netfilter.nf_conntrack_udp_timeout: "180"
+  net.netfilter.nf_conntrack_udp_timeout_stream: "300"
+
+xui_xray_policy_conn_idle: 0
+xui_xray_policy_handshake: 8
+
+xui_xray_dns_query_strategy: "UseIPv4"
+xui_xray_dns_servers:
+  - "8.8.8.8"
+  - "8.8.4.4"
+
+xui_additional_security_components:
+  - "UFW с минимальным набором открытых TCP-портов"
+  - "Fail2ban для sshd, recidive и логов панели 3x-ui"
+  - "Unattended-upgrades, apt-listchanges и needrestart"
+  - "Chrony для устойчивой синхронизации времени"
+  - "TCP-оптимизация под стриминг: BBR + fq + расширенные буферы сокетов"
+  - "Панель 3x-ui слушает только loopback 127.0.0.1 и открывается через SSH-туннель"
+  - "PostgreSQL как основная СУБД вместо SQLite"
+  - "Ежедневный backup 3x-ui (конфиг, сертификаты, pg_dump БД) с retention {{ xui_backup_retention_days }} дней"

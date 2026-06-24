@@ -1,0 +1,18 @@
+3x-ui Reality SNI manager
+=========================
+
+Локальный UI через SSH-туннель:
+{{ xui_manager_tunnel_url }}
+
+SSH-туннель:
+ssh -i /path/to/private_key -L {{ xui_manager_tunnel_local_port }}:127.0.0.1:{{ xui_manager_port }} root@{{ xui_server_ip }}
+
+Что делает этот контур:
+- Управляет изолированным локальным UI на loopback.
+- Ротирует Reality по slot-inbound-модели: каждый slot хранит собственный target/serverNames и отдельный listening port.
+- Показывает текущие активные fail2ban-баны и сроки истечения.
+- Позволяет менять fail2ban bantime/findtime/maxretry через отдельный override-слой.
+
+Важно:
+- Этот контур деплоится отдельным workflow `Deploy SNI Manager` и не заменяет основной production deploy.
+- Для VLESS+REALITY обратная совместимость теперь держится через отдельные slot-inbound-ы на портах {{ xui_manager_slot_ports | join(', ') }}, а не через merged serverNames.

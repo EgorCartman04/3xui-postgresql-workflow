@@ -1,0 +1,10 @@
+[Unit]
+Description=Guard времени прямого доступа к панели 3x-ui
+After=network-online.target x-ui.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart={{ xui_server_panel_access_guard_script_path }}

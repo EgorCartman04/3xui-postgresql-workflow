@@ -1,0 +1,7 @@
+[sshd]
+enabled = true
+backend = systemd
+port = ssh
+findtime = {{ xui_sshd_fail2ban_findtime }}
+bantime = {{ xui_sshd_fail2ban_bantime }}
+maxretry = {{ xui_sshd_fail2ban_maxretry }}

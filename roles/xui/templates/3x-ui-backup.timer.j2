@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily backup of 3x-ui configuration
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=Планировщик ротации Reality SNI
+
+[Timer]
+OnCalendar={{ xui_manager_rotation_on_calendar }}
+Persistent=true
+Unit={{ xui_manager_rotation_service_name }}.service
+
+[Install]
+WantedBy=timers.target

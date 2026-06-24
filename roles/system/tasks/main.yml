@@ -1,0 +1,121 @@
+---
+- name: Установить базовые пакеты hardening и эксплуатации
+  ansible.builtin.apt:
+    name: "{{ xui_system_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Установить iperf3 для сетевой диагностики
+  ansible.builtin.apt:
+    name: iperf3
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  tags: [network]
+
+- name: Включить chrony
+  ansible.builtin.service:
+    name: chrony
+    state: started
+    enabled: true
+
+- name: Создать каталог root ssh
+  ansible.builtin.file:
+    path: /root/.ssh
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Добавить публичный ключ деплоя для root
+  ansible.builtin.lineinfile:
+    path: /root/.ssh/authorized_keys
+    line: "{{ controller_ssh_public_key }}"
+    create: true
+    owner: root
+    group: root
+    mode: "0600"
+    state: present
+
+- name: Создать каталог sshd drop-in
+  ansible.builtin.file:
+    path: /etc/ssh/sshd_config.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Применить ssh hardening без отключения пароля
+  ansible.builtin.template:
+    src: sshd-hardening.conf.j2
+    dest: /etc/ssh/sshd_config.d/90-3x-ui-hardening.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart sshd
+
+- name: Настроить периодические security-updates
+  ansible.builtin.template:
+    src: 20auto-upgrades.j2
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Настроить unattended-upgrades
+  ansible.builtin.template:
+    src: 50unattended-upgrades.j2
+    dest: /etc/apt/apt.conf.d/50unattended-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Применить sysctl hardening
+  ansible.builtin.template:
+    src: 99-3x-ui-hardening.conf.j2
+    dest: /etc/sysctl.d/99-3x-ui-hardening.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload sysctl
+  tags: [network]
+
+- name: Установить systemd unit для iperf3
+  ansible.builtin.template:
+    src: 3x-ui-iperf3.service.j2
+    dest: "/etc/systemd/system/{{ xui_iperf3_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [network]
+
+- name: Включить и запустить iperf3 service
+  ansible.builtin.systemd:
+    name: "{{ xui_iperf3_service_name }}.service"
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags: [network]
+
+- name: Применить правила UFW
+  ansible.builtin.shell: |
+    set -eu
+    delete_allow_rule_by_port() {
+      local port_proto="$1"
+      local rule_num=''
+      while true; do
+        rule_num="$(ufw status numbered | sed -nE "s/^\[ *([0-9]+)\] +${port_proto//\//\\/} +ALLOW IN +Anywhere( +#.*)?$/\\1/p" | head -n1)"
+        [[ -n "${rule_num}" ]] || break
+        yes | ufw delete "${rule_num}" > /dev/null
+      done
+    }
+    ufw default deny incoming
+    ufw default allow outgoing
+    {% for port in xui_firewall_allowed_tcp_ports %}
+    delete_allow_rule_by_port "{{ port }}/tcp"
+    ufw allow {{ port }}/tcp comment '{{ xui_port_sync_comment }}'
+    {% endfor %}
+    delete_allow_rule_by_port "{{ xui_panel_port }}/tcp"
+    ufw --force enable
+  changed_when: false

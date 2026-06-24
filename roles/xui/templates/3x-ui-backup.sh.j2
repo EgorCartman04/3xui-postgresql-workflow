@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+backup_dir="{{ xui_backup_dir }}"
+timestamp="$(date +%Y%m%d-%H%M%S)"
+archive_path="${backup_dir}/3x-ui-${timestamp}.tar.gz"
+tmp_dir="$(mktemp -d /tmp/3x-ui-backup.XXXXXX)"
+trap 'rm -rf "${tmp_dir}"' EXIT
+
+export PGPASSWORD="{{ xui_db_password }}"
+
+# pg_dump of 3x-ui database
+pg_dump -U "{{ xui_db_user }}" -d "{{ xui_db_name }}" -h "{{ xui_db_host }}" -p "{{ xui_db_port }}" \
+  -F c -f "${tmp_dir}/x-ui-db.dump" --no-owner --no-acl
+
+mkdir -p "${backup_dir}"
+
+sources=()
+sources_count=0
+for path in \
+  /etc/x-ui \
+  "{{ xui_install_dir }}/bin/config.json" \
+  "{{ xui_panel_cert_dir }}" \
+  "{{ xui_manager_config_dir | default('/etc/3x-ui-manager') }}" \
+  "{{ xui_manager_state_path | default('/var/lib/3x-ui-manager/state.json') }}"; do
+  if [[ -e "${path}" ]]; then
+    sources+=("${path}")
+    sources_count=$((sources_count + 1))
+  fi
+done
+
+# Always include the database dump
+sources+=("${tmp_dir}/x-ui-db.dump")
+
+if [[ "${sources_count}" -eq 0 && "${#sources[@]}" -le 1 ]]; then
+  exit 0
+fi
+
+tar -czf "${archive_path}" -C / $(for s in "${sources[@]}"; do echo "${s#/}"; done) -C "${tmp_dir}" x-ui-db.dump 2>/dev/null || \
+tar -czf "${archive_path}" "${sources[@]}"
+find "${backup_dir}" -type f -name '3x-ui-*.tar.gz' -mtime +{{ xui_backup_retention_days }} -delete

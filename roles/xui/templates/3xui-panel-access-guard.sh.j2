@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Автоматический guard доступа панели: ограничивает длительность режима direct.
+# Если direct держится дольше xui_panel_direct_max_seconds, переключает обратно в tunnel.
+
+set -euo pipefail
+
+SWITCH_SCRIPT="{{ xui_server_panel_access_script_path }}"
+STATE_DIR="{{ xui_panel_access_state_dir }}"
+STATE_FILE="${STATE_DIR}/panel-access-state.env"
+GUARD_CONFIG_FILE="${STATE_DIR}/guard-config.env"
+DEFAULT_MAX_DIRECT_SECONDS={{ xui_panel_direct_max_seconds | int }}
+
+log_info() {
+    echo "[INFO] $*"
+}
+
+log_warn() {
+    echo "[WARN] $*" >&2
+}
+
+ensure_root() {
+    if [[ "${EUID}" -ne 0 ]]; then
+        log_warn "Guard должен запускаться от root"
+        exit 1
+    fi
+}
+
+require_cmd() {
+    local cmd="$1"
+    if ! command -v "${cmd}" >/dev/null 2>&1; then
+        log_warn "Не найдена обязательная команда: ${cmd}"
+        exit 1
+    fi
+}
+
+current_mode() {
+    "${SWITCH_SCRIPT}" --current-mode 2>/dev/null || echo "unknown"
+}
+
+read_max_direct_seconds() {
+    local configured=""
+
+    if [[ -f "${GUARD_CONFIG_FILE}" ]]; then
+        # shellcheck disable=SC1090
+        source "${GUARD_CONFIG_FILE}" || true
+        configured="${max_direct_seconds:-}"
+    fi
+
+    if [[ "${configured}" =~ ^[0-9]+$ ]] && (( configured > 0 )); then
+        echo "${configured}"
+        return
+    fi
+
+    echo "${DEFAULT_MAX_DIRECT_SECONDS}"
+}
+
+init_state_for_mode() {
+    local mode="$1"
+
+    mkdir -p "${STATE_DIR}"
+    {
+        echo "mode=${mode}"
+        echo "changed_at_epoch=$(date +%s)"
+        echo "changed_at_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "${STATE_FILE}"
+}
+
+main() {
+    local now_epoch mode state_mode state_epoch elapsed max_direct_seconds
+
+    ensure_root
+    require_cmd date
+
+    if [[ ! -x "${SWITCH_SCRIPT}" ]]; then
+        log_warn "Скрипт переключения панели не найден: ${SWITCH_SCRIPT}"
+        exit 0
+    fi
+
+    mode="$(current_mode)"
+    max_direct_seconds="$(read_max_direct_seconds)"
+
+    if [[ "${mode}" != "direct" ]]; then
+        exit 0
+    fi
+
+    now_epoch="$(date +%s)"
+
+    if [[ ! -f "${STATE_FILE}" ]]; then
+        log_info "State-файл отсутствует при direct-режиме, запускаю 30-минутный таймер с текущего момента"
+        init_state_for_mode "direct"
+        exit 0
+    fi
+
+    # shellcheck disable=SC1090
+    source "${STATE_FILE}" || true
+    state_mode="${mode:-}"  # Читаем переменную mode из STATE_FILE
+    state_epoch="${changed_at_epoch:-}"
+
+    if [[ "${state_mode}" != "direct" || ! "${state_epoch}" =~ ^[0-9]+$ ]]; then
+        log_info "State-файл невалиден для direct-режима, инициализирую заново"
+        init_state_for_mode "direct"
+        exit 0
+    fi
+
+    elapsed=$((now_epoch - state_epoch))
+
+    if (( elapsed > max_direct_seconds )); then
+        log_warn "Режим direct активен ${elapsed}с (> ${max_direct_seconds}с), переключаю обратно в tunnel"
+        "${SWITCH_SCRIPT}" --mode tunnel
+    fi
+}
+
+main "$@"

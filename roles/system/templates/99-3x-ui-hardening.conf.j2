@@ -1,0 +1,7 @@
+# Управляется Ansible.
+{% for key, value in xui_sysctl | dictsort %}
+{{ key }} = {{ value }}
+{% endfor %}
+{% for key, value in xui_conntrack_sysctl | dictsort %}
+{{ key }} = {{ value }}
+{% endfor %}

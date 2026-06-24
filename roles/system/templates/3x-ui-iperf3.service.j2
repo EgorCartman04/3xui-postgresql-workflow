@@ -1,0 +1,17 @@
+# Управляется Ansible.
+[Unit]
+Description=iperf3 server for 3x-ui network diagnostics
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/iperf3 --server --bind {{ xui_iperf3_listen_ip }} --port {{ xui_iperf3_port }}
+Restart=always
+RestartSec=2
+User=root
+Group=root
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

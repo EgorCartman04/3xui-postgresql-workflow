@@ -1,0 +1,65 @@
+---
+- name: Создать каталоги fail2ban для local-конфигов
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /etc/fail2ban/jail.d
+    - /etc/fail2ban/filter.d
+
+- name: Включить IPv6 auto в fail2ban
+  ansible.builtin.lineinfile:
+    path: /etc/fail2ban/fail2ban.conf
+    regexp: '^#?allowipv6\s*='
+    line: 'allowipv6 = auto'
+  notify: Restart fail2ban
+
+- name: Настроить jail для sshd
+  ansible.builtin.template:
+    src: jail-sshd.local.j2
+    dest: /etc/fail2ban/jail.d/sshd.local
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart fail2ban
+
+- name: Настроить jail recidive
+  ansible.builtin.template:
+    src: jail-recidive.local.j2
+    dest: /etc/fail2ban/jail.d/recidive.local
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart fail2ban
+
+- name: Установить fail2ban filter для логов 3x-ui
+  ansible.builtin.template:
+    src: filter-x-ui-admin.conf.j2
+    dest: /etc/fail2ban/filter.d/x-ui-admin.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart fail2ban
+
+- name: Установить jail для защиты login формы 3x-ui
+  ansible.builtin.template:
+    src: jail-x-ui-admin.local.j2
+    dest: /etc/fail2ban/jail.d/x-ui-admin.local
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart fail2ban
+
+- name: Включить и запустить fail2ban
+  ansible.builtin.service:
+    name: fail2ban
+    state: started
+    enabled: true
+
+- name: Включить fail2ban в 3x-ui через CLI
+  ansible.builtin.command: "{{ xui_install_dir }}/x-ui setting -fail2ban true"
+  changed_when: false
+  failed_when: false

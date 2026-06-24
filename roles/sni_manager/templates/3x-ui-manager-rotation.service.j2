@@ -1,0 +1,9 @@
+[Unit]
+Description=Ротация Reality SNI для 3x-ui
+After=x-ui.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 {{ xui_manager_install_dir }}/manager.py rotate --config {{ xui_manager_config_path }}
+User=root
+Group=root

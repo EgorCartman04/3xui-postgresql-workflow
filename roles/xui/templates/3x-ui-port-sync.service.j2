@@ -1,0 +1,8 @@
+[Unit]
+Description=Синхронизация UFW с inbound-портами 3x-ui
+After=network-online.target ufw.service x-ui.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/3x-ui-port-sync.sh

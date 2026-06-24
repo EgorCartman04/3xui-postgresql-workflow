@@ -1,0 +1,35 @@
+{
+  "listen_host": {{ xui_manager_listen_ip | to_json }},
+  "listen_port": {{ xui_manager_port }},
+  "xui_db_path": {{ xui_db_path | to_json }},
+  "fail2ban_db_path": {{ xui_manager_fail2ban_db_path | to_json }},
+  "fail2ban_override_path": {{ xui_manager_fail2ban_override_path | to_json }},
+  "rotation_timer_unit": {{ xui_manager_rotation_timer_name | to_json }},
+  "rotation_service_unit": {{ (xui_manager_rotation_service_name ~ '.service') | to_json }},
+  "xui_service_unit": {{ (xui_service_name ~ '.service') | to_json }},
+  "sni_list_path": {{ xui_manager_sni_list_path | to_json }},
+  "state_path": {{ xui_manager_state_path | to_json }},
+  "rotation_log_path": {{ xui_manager_rotation_log_file | to_json }},
+  "runtime_log_path": {{ xui_manager_runtime_log_file | to_json }},
+  "tls": {
+    "enabled": true,
+    "cert_path": {{ (xui_panel_cert_dir ~ '/fullchain.pem') | to_json }},
+    "key_path": {{ (xui_panel_cert_dir ~ '/privkey.pem') | to_json }}
+  },
+  "auth": {
+    "realm": "3x-ui SNI Manager",
+    "source": "x-ui-users-db"
+  },
+  "rotation": {
+    "enabled": {{ xui_manager_rotation_enabled | to_json }},
+    "on_calendar": {{ xui_manager_rotation_on_calendar | to_json }},
+    "window_size": {{ xui_manager_rotation_window_size }}
+  },
+  "slots": {
+    "ports": {{ xui_manager_slot_ports | to_json }},
+    "auto_provision": {{ xui_manager_slot_auto_provision | to_json }}
+  },
+  "ui": {
+    "title": "3x-ui SNI Manager"
+  }
+}

@@ -1,0 +1,52 @@
+name: Deploy 3x-ui + PostgreSQL
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_mode:
+        description: 'Режим деплоя'
+        required: true
+        type: choice
+        default: 'update'
+        options:
+          - update
+          - full
+      xui_version:
+        description: 'Версия 3x-ui (пусто = из inventory)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p .secrets/ssh
+          echo "${{ secrets.ANSIBLE_DEPLOY_KEY }}" > .secrets/ssh/ansible_deploy_key
+          chmod 600 .secrets/ssh/ansible_deploy_key
+
+      - name: Install Ansible
+        run: pip install ansible
+
+      - name: Syntax check
+        run: ansible-playbook --syntax-check playbooks/site.yml
+
+      - name: Deploy
+        run: |
+          ansible-playbook playbooks/site.yml \
+            --tags ${{ github.event.inputs.deploy_mode }} \
+            ${{
+              github.event.inputs.xui_version != ''
+              && format('-e xui_version={0}', github.event.inputs.xui_version)
+              || ''
+            }}
+        env:
+          XUI_ADMIN_USERNAME: ${{ secrets.XUI_ADMIN_USERNAME }}
+          XUI_ADMIN_PASSWORD: ${{ secrets.XUI_ADMIN_PASSWORD }}
+          XUI_PANEL_BASE_PATH: ${{ secrets.XUI_PANEL_BASE_PATH }}
+          XUI_DB_PASSWORD: ${{ secrets.XUI_DB_PASSWORD }}
+          ANSIBLE_REMOTE_USER: ${{ vars.ANSIBLE_REMOTE_USER || 'root' }}

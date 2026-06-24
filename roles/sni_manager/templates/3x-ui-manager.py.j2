@@ -1,0 +1,1467 @@
+#!/usr/bin/env python3
+import argparse
+import base64
+import binascii
+import hmac
+import json
+import os
+import re
+import shutil
+import sqlite3
+import ssl
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+# Conditional crypt import for Python 3.13+ compatibility
+# Ubuntu 26.04+ removed crypt module, use fallback if needed
+try:
+    import crypt
+    CRYPT_AVAILABLE = True
+except ImportError:
+    CRYPT_AVAILABLE = False
+
+
+DOMAIN_RE = re.compile(r"^[A-Za-z0-9.-]+$")
+VISION_FLOWS = {"xtls-rprx-vision", "xtls-rprx-vision-udp443"}
+ROTATION_LOCK = threading.Lock()
+
+
+def utc_now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+def read_json(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError:
+        return default
+
+
+def write_json(path, payload):
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_suffix(target.suffix + ".tmp")
+    with open(temp, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    os.replace(temp, target)
+
+
+def append_log(path, message):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    line = f"[{utc_now_iso()}] {message}\n"
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(line)
+
+
+def load_config(path):
+    payload = read_json(path, {})
+    if not payload:
+        raise RuntimeError(f"Не найден конфиг менеджера: {path}")
+    return payload
+
+
+def default_state():
+    return {
+        "active_index": -1,
+        "current_entry": None,
+        "effective_server_names": [],
+        "rotation_window_entries": [],
+        "slot_inbounds": [],
+        "active_generations": [],
+        "next_generation_id": 1,
+        "last_rotation_at": None,
+        "last_rotation_result": None,
+    }
+
+
+def load_state(config):
+    state = read_json(config["state_path"], {})
+    defaults = default_state()
+    if not state:
+        return defaults
+    for key, value in defaults.items():
+        if key not in state:
+            if isinstance(value, list):
+                state[key] = []
+            elif isinstance(value, dict):
+                state[key] = {}
+            else:
+                state[key] = value
+    return state
+
+
+def save_state(config, state):
+    write_json(config["state_path"], state)
+
+
+def parse_sni_entries_lines(lines):
+    entries = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        target = line
+        server_names = []
+        if "|" in line:
+            left, right = line.split("|", 1)
+            target = left.strip()
+            server_names = [item.strip() for item in right.split(",") if item.strip()]
+        if ":" not in target:
+            target = f"{target}:443"
+        host = target.rsplit(":", 1)[0].strip()
+        if not DOMAIN_RE.match(host):
+            raise ValueError(f"Некорректный host в списке SNI: {host}")
+        if not server_names:
+            server_names = [host]
+        for item in server_names:
+            if not DOMAIN_RE.match(item):
+                raise ValueError(f"Некорректный serverName в списке SNI: {item}")
+        entries.append({
+            "target": target,
+            "server_names": server_names,
+            "label": ", ".join(server_names),
+        })
+    if not entries:
+        raise ValueError("Список SNI пуст")
+    return entries
+
+
+def read_sni_entries(path):
+    with open(path, "r", encoding="utf-8") as handle:
+        return parse_sni_entries_lines(handle)
+
+
+def parse_sni_entries_text(text):
+    return parse_sni_entries_lines(text.splitlines())
+
+
+def is_supported_reality_flow(flow):
+    return flow in VISION_FLOWS or flow in (None, "")
+
+
+def entry_key(entry):
+    if not entry:
+        return None
+    return (entry.get("target", ""), tuple(entry.get("server_names") or []))
+
+
+def find_entry_index(entries, candidate):
+    candidate_key = entry_key(candidate)
+    if candidate_key is None:
+        return -1
+    for index, entry in enumerate(entries):
+        if entry_key(entry) == candidate_key:
+            return index
+    return -1
+
+
+def run_command(args, check=True):
+    completed = subprocess.run(args, capture_output=True, text=True)
+    if check and completed.returncode != 0:
+        raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "command failed")
+    return completed
+
+
+def timer_override_path(config):
+    return f"/etc/systemd/system/{config['rotation_timer_unit']}.d/override.conf"
+
+
+def write_timer_override(config):
+    override = timer_override_path(config)
+    Path(override).parent.mkdir(parents=True, exist_ok=True)
+    content = (
+        "[Timer]\n"
+        "OnCalendar=\n"
+        f"OnCalendar={config['rotation']['on_calendar']}\n"
+        "Persistent=true\n"
+    )
+    with open(override, "w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
+def set_timer_state(config, enabled):
+    write_timer_override(config)
+    run_command(["systemctl", "daemon-reload"])
+    if enabled:
+        run_command(["systemctl", "enable", "--now", config["rotation_timer_unit"]])
+    else:
+        run_command(["systemctl", "disable", "--now", config["rotation_timer_unit"]], check=False)
+
+
+def backup_db(config):
+    source = Path(config["xui_db_path"])
+    if not source.exists():
+        raise RuntimeError(f"База 3x-ui не найдена: {source}")
+    backup_dir = Path(config["state_path"]).parent / "db-backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    destination = backup_dir / f"x-ui-{int(time.time())}.db"
+    shutil.copy2(source, destination)
+    return str(destination)
+
+
+def normalize_window_size(config):
+    rotation = config.get("rotation") or {}
+    raw_value = rotation.get("window_size", 1)
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        raise ValueError("Окно совместимости должно быть целым числом")
+    if value < 1:
+        raise ValueError("Окно совместимости должно быть не меньше 1")
+    return value
+
+
+def normalize_slot_ports(config):
+    slots = config.get("slots") or {}
+    raw_ports = slots.get("ports") or []
+    normalized = []
+    seen = set()
+    for raw_value in raw_ports:
+        try:
+            port = int(raw_value)
+        except (TypeError, ValueError):
+            raise ValueError("slots.ports должны содержать только целые порты")
+        if port < 1 or port > 65535:
+            raise ValueError("slot port должен быть в диапазоне 1..65535")
+        if port in seen:
+            raise ValueError(f"slot port дублируется: {port}")
+        seen.add(port)
+        normalized.append(port)
+    return normalized
+
+
+def validate_rotation_slots(config):
+    window_size = normalize_window_size(config)
+    slot_ports = normalize_slot_ports(config)
+    if not slot_ports:
+        raise ValueError("Для slot-based ротации нужно задать slots.ports")
+    if len(slot_ports) < window_size:
+        raise ValueError("Количество slot ports должно быть не меньше окна совместимости")
+    return window_size, slot_ports
+
+
+def prune_extra_slot_inbounds(connection, config):
+    window_size, slot_ports = validate_rotation_slots(config)
+    desired_ports = set(slot_ports[:window_size])
+    extra_ports = set(slot_ports) - desired_ports
+    if not extra_ports:
+        return []
+
+    managed = discover_managed_inbounds(connection)
+    deleted_ports = []
+    for inbound in managed:
+        port = inbound.get("port")
+        if port not in extra_ports:
+            continue
+        connection.execute("DELETE FROM inbounds WHERE id = ?", (inbound["id"],))
+        deleted_ports.append(port)
+    if deleted_ports:
+        connection.commit()
+    return deleted_ports
+
+
+def desired_slot_ports(config):
+    window_size, slot_ports = validate_rotation_slots(config)
+    return slot_ports[:window_size]
+
+
+def slot_base_remark(remark):
+    base = re.sub(r"\s*\[slot\s+\d+\]$", "", (remark or "").strip())
+    return base or "reality-slot"
+
+
+def slot_remark(base_remark, index):
+    if index == 0:
+        return base_remark
+    return f"{base_remark} [slot {index + 1}]"
+
+
+def slot_tag(port):
+    return f"inbound-{port}"
+
+
+def entry_map(entries):
+    return {entry_key(entry): entry for entry in entries}
+
+
+def active_generations_from_state(state, entries, slot_inbounds, managed_inbounds):
+    slot_map = {slot["port"]: slot for slot in slot_inbounds}
+    entries_by_key = entry_map(entries)
+    active = []
+    used_ports = set()
+    next_generation_id = max(int(state.get("next_generation_id", 1) or 1), 1)
+    raw_generations = state.get("active_generations") or []
+
+    for raw_generation in raw_generations:
+        try:
+            slot_port = int(raw_generation.get("slot_port"))
+        except (TypeError, ValueError):
+            continue
+        if slot_port not in slot_map or slot_port in used_ports:
+            continue
+        entry = entries_by_key.get(entry_key(raw_generation.get("entry") or {}))
+        if entry is None:
+            continue
+        raw_generation_id = raw_generation.get("generation_id")
+        try:
+            generation_id = int(raw_generation_id)
+        except (TypeError, ValueError):
+            generation_id = next_generation_id
+            next_generation_id += 1
+        else:
+            next_generation_id = max(next_generation_id, generation_id + 1)
+        active.append({
+            "generation_id": generation_id,
+            "slot_port": slot_port,
+            "slot_inbound_id": slot_map[slot_port]["id"],
+            "entry": entry,
+            "activated_at": raw_generation.get("activated_at") or raw_generation.get("created_at") or utc_now_iso(),
+        })
+        used_ports.add(slot_port)
+
+    if active or raw_generations:
+        return active, next_generation_id
+
+    managed_by_port = {item["port"]: item for item in managed_inbounds if item.get("enable")}
+    for slot in slot_inbounds:
+        current = managed_by_port.get(slot["port"])
+        if current is None or slot["port"] in used_ports:
+            continue
+        entry = entries_by_key.get(entry_key(current))
+        if entry is None:
+            continue
+        generation_id = next_generation_id
+        next_generation_id += 1
+        active.append({
+            "generation_id": generation_id,
+            "slot_port": slot["port"],
+            "slot_inbound_id": slot["id"],
+            "entry": entry,
+            "activated_at": utc_now_iso(),
+        })
+        used_ports.add(slot["port"])
+
+    return active, next_generation_id
+
+
+def generation_entries(active_generations):
+    return [generation["entry"] for generation in active_generations]
+
+
+def find_generation_index(active_generations, entry):
+    candidate_key = entry_key(entry)
+    if candidate_key is None:
+        return -1
+    for index, generation in enumerate(active_generations):
+        if entry_key(generation["entry"]) == candidate_key:
+            return index
+    return -1
+
+
+def activate_entry(config, slot_inbounds, active_generations, entry, next_generation_id, force_new=False):
+    window_size, _ = validate_rotation_slots(config)
+    if not force_new:
+        existing_index = find_generation_index(active_generations, entry)
+        if existing_index >= 0:
+            generation = active_generations.pop(existing_index)
+            active_generations.insert(0, generation)
+            return active_generations, next_generation_id, "reused"
+
+    reusable_port = None
+    if len(active_generations) >= window_size:
+        reusable_port = active_generations.pop(-1)["slot_port"]
+    else:
+        used_ports = {generation["slot_port"] for generation in active_generations}
+        for slot in slot_inbounds:
+            if slot["port"] not in used_ports:
+                reusable_port = slot["port"]
+                break
+
+    if reusable_port is None:
+        raise RuntimeError("Не удалось выделить slot port для нового generation")
+
+    slot_map = {slot["port"]: slot for slot in slot_inbounds}
+
+    # Всегда помещаем новый generation на primary slot (slot_inbounds[0]),
+    # чтобы subscription сразу отдавала новый SNI первой записью.
+    # Generation, которое занимало primary slot, переносим на освобождённый порт.
+    if slot_inbounds:
+        primary_port = slot_inbounds[0]["port"]
+        if reusable_port != primary_port:
+            for gen in active_generations:
+                if gen["slot_port"] == primary_port:
+                    gen["slot_port"] = reusable_port
+                    gen["slot_inbound_id"] = slot_map[reusable_port]["id"]
+                    break
+            reusable_port = primary_port
+
+    slot = slot_map[reusable_port]
+    active_generations.insert(0, {
+        "generation_id": next_generation_id,
+        "slot_port": reusable_port,
+        "slot_inbound_id": slot["id"],
+        "entry": entry,
+        "activated_at": utc_now_iso(),
+    })
+    return active_generations, next_generation_id + 1, "created"
+
+
+def trim_active_generations_to_window_size(config, active_generations):
+    window_size, _ = validate_rotation_slots(config)
+    if len(active_generations) <= window_size:
+        return active_generations, False
+    return active_generations[:window_size], True
+
+
+def build_rotation_window(entries, active_index, window_size):
+    if not entries:
+        return []
+    window = []
+    seen = set()
+    limit = min(len(entries), window_size)
+    for offset in range(limit):
+        index = (active_index - offset) % len(entries)
+        entry = entries[index]
+        key = (entry["target"], tuple(entry["server_names"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        window.append(entry)
+    return window
+
+
+def merge_server_names(window_entries):
+    merged = []
+    seen = set()
+    for entry in window_entries:
+        for server_name in entry["server_names"]:
+            if server_name in seen:
+                continue
+            seen.add(server_name)
+            merged.append(server_name)
+    return merged
+
+
+def discover_managed_inbounds(connection):
+    managed = []
+    rows = connection.execute(
+        "SELECT id, remark, enable, port, tag, stream_settings, settings FROM inbounds WHERE protocol = 'vless'"
+    ).fetchall()
+    for inbound_id, remark, enable, port, tag, stream_raw, settings_raw in rows:
+        if not stream_raw or not settings_raw:
+            continue
+        try:
+            stream = json.loads(stream_raw)
+            settings = json.loads(settings_raw)
+        except json.JSONDecodeError:
+            continue
+        if stream.get("security") != "reality":
+            continue
+        if stream.get("network") != "tcp":
+            continue
+        clients = settings.get("clients") or []
+        if not any(is_supported_reality_flow((client or {}).get("flow")) for client in clients):
+            continue
+        reality = stream.get("realitySettings") or {}
+        managed.append({
+            "id": inbound_id,
+            "remark": remark,
+            "enable": bool(enable),
+            "port": int(port or 0),
+            "tag": tag or "",
+            "target": reality.get("target", ""),
+            "server_names": reality.get("serverNames", []),
+        })
+    managed.sort(key=lambda item: (item.get("port", 0), item["id"]))
+    return managed
+
+
+def load_inbound_row(connection, inbound_id):
+    row = connection.execute(
+        "SELECT * FROM inbounds WHERE id = ?",
+        (inbound_id,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(f"Inbound id={inbound_id} не найден")
+    return row
+
+
+def get_table_columns(connection, table_name):
+    rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {row[1] for row in rows}
+
+
+def clone_slot_inbound(connection, base_row, port, remark, tag):
+    columns = get_table_columns(connection, "inbounds")
+    base_values = dict(base_row)
+    values_by_column = {
+        "user_id": base_values.get("user_id", 0),
+        "up": 0,
+        "down": 0,
+        "total": 0,
+        "all_time": 0,
+        "remark": remark,
+        "enable": 1,
+        "expiry_time": base_values.get("expiry_time", 0),
+        "traffic_reset": base_values.get("traffic_reset", 0),
+        "last_traffic_reset_time": base_values.get("last_traffic_reset_time", 0),
+        "listen": base_values.get("listen", ""),
+        "port": port,
+        "protocol": base_values.get("protocol", "vless"),
+        "settings": base_values.get("settings", "{}"),
+        "stream_settings": base_values.get("stream_settings", "{}"),
+        "tag": tag,
+        "sniffing": base_values.get("sniffing", ""),
+    }
+    insert_columns = [name for name in values_by_column if name in columns]
+    placeholders = ", ".join("?" for _ in insert_columns)
+    sql = f"INSERT INTO inbounds ({', '.join(insert_columns)}) VALUES ({placeholders})"
+    connection.execute(sql, tuple(values_by_column[name] for name in insert_columns))
+    return connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def ensure_slot_inbounds(connection, config):
+    window_size, slot_ports = validate_rotation_slots(config)
+    slot_ports = slot_ports[:window_size]
+    prune_extra_slot_inbounds(connection, config)
+    managed = discover_managed_inbounds(connection)
+    if not managed:
+        raise RuntimeError("Не найдены inbound-ы VLESS+REALITY+Vision для управления")
+
+    managed_by_port = {item["port"]: item for item in managed}
+    base_inbound = managed_by_port.get(slot_ports[0]) or managed[0]
+    base_row = load_inbound_row(connection, base_inbound["id"])
+    base_remark = slot_base_remark(base_row["remark"])
+    auto_provision = bool((config.get("slots") or {}).get("auto_provision", False))
+
+    slot_inbounds = []
+    for index, port in enumerate(slot_ports):
+        current = managed_by_port.get(port)
+        desired_remark = slot_remark(base_remark, index)
+        desired_tag = slot_tag(port)
+
+        if current is None:
+            if not auto_provision:
+                raise RuntimeError(f"Не найден slot inbound для порта {port}, а auto_provision отключён")
+            inbound_id = clone_slot_inbound(connection, base_row, port, desired_remark, desired_tag)
+            current = {
+                "id": inbound_id,
+                "remark": desired_remark,
+                "enable": True,
+                "port": port,
+                "tag": desired_tag,
+                "target": "",
+                "server_names": [],
+            }
+
+        updates = []
+        params = []
+        if current.get("remark") != desired_remark:
+            updates.append("remark = ?")
+            params.append(desired_remark)
+        if current.get("tag") != desired_tag:
+            updates.append("tag = ?")
+            params.append(desired_tag)
+        if current.get("port") != port:
+            updates.append("port = ?")
+            params.append(port)
+        if updates:
+            params.append(current["id"])
+            connection.execute(f"UPDATE inbounds SET {', '.join(updates)} WHERE id = ?", params)
+
+        slot_inbounds.append({
+            "id": current["id"],
+            "remark": desired_remark,
+            "port": port,
+            "tag": desired_tag,
+        })
+
+    return slot_inbounds
+
+
+def apply_generations_to_slot_inbounds(connection, config, slot_inbounds, active_generations):
+    backup_path = backup_db(config)
+    desired_ports = {slot_inbound["port"] for slot_inbound in slot_inbounds}
+    stale_managed_inbounds = [item for item in discover_managed_inbounds(connection) if item["port"] not in desired_ports]
+    for stale_inbound in stale_managed_inbounds:
+        connection.execute("DELETE FROM inbounds WHERE id = ?", (stale_inbound["id"],))
+    active_by_port = {generation["slot_port"]: generation for generation in active_generations}
+    applied_inbounds = []
+
+    for slot_inbound in slot_inbounds:
+        generation = active_by_port.get(slot_inbound["port"])
+        if generation is None:
+            connection.execute(
+                "UPDATE inbounds SET enable = 0 WHERE id = ?",
+                (slot_inbound["id"],),
+            )
+            continue
+
+        row = connection.execute(
+            "SELECT stream_settings FROM inbounds WHERE id = ?",
+            (slot_inbound["id"],),
+        ).fetchone()
+        stream = json.loads(row["stream_settings"])
+        reality = stream.get("realitySettings") or {}
+        reality["target"] = generation["entry"]["target"]
+        reality["serverNames"] = generation["entry"]["server_names"]
+        stream["realitySettings"] = reality
+        connection.execute(
+            "UPDATE inbounds SET stream_settings = ?, enable = 1 WHERE id = ?",
+            (json.dumps(stream, ensure_ascii=False, indent=2), slot_inbound["id"]),
+        )
+        applied_inbounds.append({
+            "id": slot_inbound["id"],
+            "remark": slot_inbound["remark"],
+            "port": slot_inbound["port"],
+            "tag": slot_inbound["tag"],
+            "target": generation["entry"]["target"],
+            "server_names": generation["entry"]["server_names"],
+            "slot_index": next((index for index, slot in enumerate(slot_inbounds) if slot["port"] == slot_inbound["port"]), 0),
+            "generation_id": generation["generation_id"],
+            "activated_at": generation["activated_at"],
+        })
+
+    connection.commit()
+    run_command(["systemctl", "restart", config["xui_service_unit"]])
+    return backup_path, applied_inbounds
+
+
+def persist_generation_state(config, state, active_generations, active_index, result_status, log_path, log_prefix, backup_path, applied_inbounds):
+    current_entry = active_generations[0]["entry"] if active_generations else None
+    window_entries = generation_entries(active_generations)
+    state["active_generations"] = active_generations
+    state["active_index"] = active_index
+    state["current_entry"] = current_entry
+    state["effective_server_names"] = current_entry["server_names"] if current_entry else []
+    state["rotation_window_entries"] = window_entries
+    state["slot_inbounds"] = applied_inbounds
+    state["last_rotation_at"] = utc_now_iso()
+    state["last_rotation_result"] = {
+        "status": result_status,
+        "backup_path": backup_path,
+        "managed_inbounds": applied_inbounds,
+        "window_size": len(active_generations),
+        "window_entries": window_entries,
+        "effective_server_names": current_entry["server_names"] if current_entry else [],
+    }
+    save_state(config, state)
+    append_log(
+        log_path,
+        f"{log_prefix}: generations={[(item['generation_id'], item['port'], item['target']) for item in applied_inbounds]} backup={backup_path}",
+    )
+    return state
+
+
+def prepare_generation_context(config, entries):
+    state = load_state(config)
+    connection = sqlite3.connect(config["xui_db_path"])
+    connection.row_factory = sqlite3.Row
+    slot_inbounds = ensure_slot_inbounds(connection, config)
+    managed_inbounds = discover_managed_inbounds(connection)
+    active_generations, next_generation_id = active_generations_from_state(state, entries, slot_inbounds, managed_inbounds)
+    return connection, state, slot_inbounds, active_generations, next_generation_id
+
+
+def reconcile_sni_list(config, entries):
+    with ROTATION_LOCK:
+        connection, state, slot_inbounds, active_generations, next_generation_id = prepare_generation_context(config, entries)
+        try:
+            valid_keys = {entry_key(entry) for entry in entries}
+            filtered_generations = []
+            seen_keys = set()
+            for generation in active_generations:
+                generation_key = entry_key(generation["entry"])
+                if generation_key not in valid_keys or generation_key in seen_keys:
+                    continue
+                seen_keys.add(generation_key)
+                filtered_generations.append(generation)
+            active_generations = filtered_generations
+            active_generations, trimmed = trim_active_generations_to_window_size(config, active_generations)
+            if not active_generations:
+                active_generations, next_generation_id, _ = activate_entry(
+                    config,
+                    slot_inbounds,
+                    active_generations,
+                    entries[0],
+                    next_generation_id,
+                )
+
+            current_entry = active_generations[0]["entry"]
+            active_index = find_entry_index(entries, current_entry)
+            backup_path, applied_inbounds = apply_generations_to_slot_inbounds(
+                connection,
+                config,
+                slot_inbounds,
+                active_generations,
+            )
+            state["next_generation_id"] = next_generation_id
+            result_status = "trimmed" if trimmed else "reconciled"
+            return persist_generation_state(
+                config,
+                state,
+                active_generations,
+                active_index,
+                result_status,
+                config["runtime_log_path"],
+                "sni list reconciled",
+                backup_path,
+                applied_inbounds,
+            )
+        finally:
+            connection.close()
+
+
+def rotate_now(config, force_new=False):
+    with ROTATION_LOCK:
+        entries = read_sni_entries(config["sni_list_path"])
+        connection, state, slot_inbounds, active_generations, next_generation_id = prepare_generation_context(config, entries)
+        try:
+            active_generations, trimmed = trim_active_generations_to_window_size(config, active_generations)
+            if trimmed:
+                active_index = find_entry_index(entries, active_generations[0]["entry"]) if active_generations else -1
+                backup_path, applied_inbounds = apply_generations_to_slot_inbounds(
+                    connection,
+                    config,
+                    slot_inbounds,
+                    active_generations,
+                )
+                state["next_generation_id"] = next_generation_id
+                return persist_generation_state(
+                    config,
+                    state,
+                    active_generations,
+                    active_index,
+                    "trimmed",
+                    config["rotation_log_path"],
+                    "rotation trimmed to window size",
+                    backup_path,
+                    applied_inbounds,
+                )
+            current_index = find_entry_index(entries, active_generations[0]["entry"]) if active_generations else -1
+            next_index = (current_index + 1) % len(entries)
+            next_entry = entries[next_index]
+            active_generations, next_generation_id, activation_mode = activate_entry(
+                config,
+                slot_inbounds,
+                active_generations,
+                next_entry,
+                next_generation_id,
+                force_new=force_new,
+            )
+            active_index = find_entry_index(entries, active_generations[0]["entry"])
+            backup_path, applied_inbounds = apply_generations_to_slot_inbounds(
+                connection,
+                config,
+                slot_inbounds,
+                active_generations,
+            )
+            state["next_generation_id"] = next_generation_id
+            status = "ok" if activation_mode == "created" else "reused"
+            return persist_generation_state(
+                config,
+                state,
+                active_generations,
+                active_index,
+                status,
+                config["rotation_log_path"],
+                "rotation applied",
+                backup_path,
+                applied_inbounds,
+            )
+        finally:
+            connection.close()
+
+
+def load_fail2ban_bans(config):
+    path = Path(config["fail2ban_db_path"])
+    if not path.exists():
+        return []
+    connection = sqlite3.connect(path)
+    now = int(time.time())
+    rows = connection.execute(
+        "SELECT ip, jail, timeofban, bantime, bancount FROM bips "
+        "WHERE (timeofban + bantime > ? OR bantime <= -1) "
+        "ORDER BY jail ASC, timeofban DESC",
+        (now,),
+    ).fetchall()
+    connection.close()
+    bans = []
+    for ip, jail, timeofban, bantime, bancount in rows:
+        expires_at = None if bantime == -1 else datetime.fromtimestamp(timeofban + bantime, tz=timezone.utc).isoformat()
+        bans.append({
+            "ip": ip,
+            "jail": jail,
+            "timeofban": timeofban,
+            "bantime": bantime,
+            "bancount": bancount,
+            "expires_at": expires_at,
+        })
+    return bans
+
+
+def parse_jails_from_status(output):
+    for line in output.splitlines():
+        if "Jail list:" in line:
+            _, value = line.split(":", 1)
+            return [item.strip() for item in value.split(",") if item.strip()]
+    return []
+
+
+def get_fail2ban_settings():
+    status = run_command(["fail2ban-client", "status"], check=False)
+    jails = parse_jails_from_status(status.stdout)
+    result = {}
+    for jail in jails:
+        jail_settings = {}
+        for field in ("bantime", "findtime", "maxretry"):
+            response = run_command(["fail2ban-client", "get", jail, field], check=False)
+            jail_settings[field] = (response.stdout or response.stderr).strip()
+        result[jail] = jail_settings
+    return result
+
+
+def write_fail2ban_override(config, payload):
+    lines = [
+        "# Этот файл управляется локальным UI 3x-ui-manager.",
+        "",
+    ]
+    for jail, settings in payload.items():
+        lines.append(f"[{jail}]")
+        lines.append("enabled = true")
+        lines.append(f"findtime = {settings['findtime']}")
+        lines.append(f"bantime = {settings['bantime']}")
+        lines.append(f"maxretry = {int(settings['maxretry'])}")
+        lines.append("")
+    with open(config["fail2ban_override_path"], "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines).rstrip() + "\n")
+    run_command(["systemctl", "restart", "fail2ban.service"])
+    append_log(config["runtime_log_path"], "fail2ban override updated")
+
+
+def timer_status(config):
+    response = run_command(
+        [
+            "systemctl",
+            "show",
+            config["rotation_timer_unit"],
+            "--property=ActiveState,UnitFileState,NextElapseUSecRealtime",
+            "--no-page",
+        ],
+        check=False,
+    )
+    result = {}
+    for line in response.stdout.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            result[key] = value
+    return result
+
+
+def read_text(path):
+    with open(path, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def verify_xui_user_credentials(xui_db_path, username, password):
+    if not username or not password:
+        return False
+
+    connection = sqlite3.connect(xui_db_path)
+    try:
+        row = connection.execute(
+            "SELECT password FROM users WHERE username = ? LIMIT 1",
+            (username,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    if not row:
+        return False
+
+    stored_hash = str(row[0] or "").strip()
+    if not stored_hash:
+        return False
+
+    # bcrypt (3x-ui v2+ hashes start with $2a$, $2b$, $2y$)
+    if stored_hash.startswith("$2"):
+        try:
+            import bcrypt as _bcrypt
+            return _bcrypt.checkpw(password.encode(), stored_hash.encode())
+        except ImportError:
+            print(
+                f"WARNING: bcrypt module not available for user '{username}'",
+                file=sys.stderr,
+            )
+            return False
+
+    # Legacy crypt (SHA-512 / MD5 / DES — Python < 3.13 or python3-crypt)
+    if CRYPT_AVAILABLE:
+        computed = crypt.crypt(password, stored_hash)
+        if not computed or computed.startswith("*"):
+            return False
+        return hmac.compare_digest(computed, stored_hash)
+
+    print(
+        f"WARNING: neither crypt nor bcrypt module available"
+        f" - authentication disabled for user '{username}'",
+        file=sys.stderr,
+    )
+    return False
+
+
+class App:
+    def __init__(self, config_path):
+        self.config_path = config_path
+
+    @property
+    def config(self):
+        return load_config(self.config_path)
+
+    def build_status(self):
+        config = self.config
+        state = load_state(config)
+        current_entries = read_sni_entries(config["sni_list_path"])
+        inbounds = []
+        connection = sqlite3.connect(config["xui_db_path"])
+        try:
+            inbounds = discover_managed_inbounds(connection)
+        finally:
+            connection.close()
+        bans = load_fail2ban_bans(config)
+        fail2ban = get_fail2ban_settings()
+        counts = {}
+        for item in bans:
+            counts[item["jail"]] = counts.get(item["jail"], 0) + 1
+        display_state = dict(state)
+        display_generations = []
+        valid_generation_keys = {entry_key(entry) for entry in current_entries}
+        for generation in display_state.get("active_generations") or []:
+            generation_key = entry_key(generation.get("entry") or {})
+            if generation_key not in valid_generation_keys:
+                continue
+            display_generations.append(generation)
+        if display_generations:
+            display_state["active_generations"] = display_generations
+            # Найти поколение основного слота (первый слот с port 443) для отображения текущего SNI
+            _, slot_ports = validate_rotation_slots(config)
+            primary_slot_port = slot_ports[0] if slot_ports else 443
+            primary_generation = next((g for g in display_generations if g.get("slot_port") == primary_slot_port), display_generations[0])
+            display_state["current_entry"] = primary_generation["entry"]
+            display_state["effective_server_names"] = primary_generation["entry"].get("server_names", [])
+            # rotation_window_entries должны быть отсортированы по slot_port
+            sorted_generations = sorted(display_generations, key=lambda g: g.get("slot_port", 443))
+            display_state["rotation_window_entries"] = [generation["entry"] for generation in sorted_generations]
+        if find_entry_index(current_entries, display_state.get("current_entry")) < 0:
+            display_state["current_entry"] = None
+            display_state["effective_server_names"] = []
+            display_state["rotation_window_entries"] = []
+        if not display_state.get("current_entry") and inbounds:
+            primary_inbound = next((item for item in inbounds if item.get("enable")), inbounds[0])
+            display_state["current_entry"] = {
+            "target": primary_inbound.get("target", ""),
+            "server_names": primary_inbound.get("server_names", []),
+            "label": ", ".join(primary_inbound.get("server_names", [])),
+            }
+        if not display_state.get("effective_server_names") and inbounds:
+            primary_inbound = next((item for item in inbounds if item.get("enable")), inbounds[0])
+            display_state["effective_server_names"] = primary_inbound.get("server_names", [])
+        if not display_state.get("slot_inbounds"):
+            display_state["slot_inbounds"] = [
+                {
+                    "id": item["id"],
+                    "remark": item["remark"],
+                    "port": item["port"],
+                    "tag": item["tag"],
+                    "target": item["target"],
+                    "server_names": item["server_names"],
+                    "slot_index": index,
+                }
+                for index, item in enumerate(inbounds)
+            ]
+        return {
+            "config": config,
+            "state": display_state,
+            "entries": current_entries,
+            "managed_inbounds": inbounds,
+            "timer": timer_status(config),
+            "fail2ban": {
+            "settings": fail2ban,
+            "current_bans": bans,
+            "counts": counts,
+            },
+        }
+
+    def verify_authorization_header(self, authorization_header):
+        auth_cfg = self.config.get("auth") or {}
+        source = auth_cfg.get("source", "")
+        if source and source != "x-ui-users-db":
+            return False
+
+        if not authorization_header or not authorization_header.startswith("Basic "):
+            return False
+
+        token = authorization_header.split(" ", 1)[1].strip()
+        if not token:
+            return False
+
+        try:
+            decoded = base64.b64decode(token, validate=True).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError):
+            return False
+
+        if ":" not in decoded:
+            return False
+
+        username, password = decoded.split(":", 1)
+        return verify_xui_user_credentials(self.config["xui_db_path"], username, password)
+
+    def auth_realm(self):
+        auth_cfg = self.config.get("auth") or {}
+        return auth_cfg.get("realm") or "3x-ui SNI Manager"
+
+
+def html_page(status):
+{% raw %}
+        return f"""<!doctype html>
+<html lang=\"ru\">
+<head>
+    <meta charset=\"utf-8\">
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+    <title>{status['config']['ui']['title']}</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background: #f4f6f8; color: #18212b; }}
+        header {{ padding: 20px 24px; background: linear-gradient(135deg, #0b1f33, #214f7a); color: #fff; }}
+        main {{ padding: 24px; max-width: 1180px; margin: 0 auto; }}
+        nav {{ display: flex; gap: 12px; margin-bottom: 20px; }}
+        nav button {{ border: 0; padding: 10px 14px; border-radius: 10px; background: #dde6ee; cursor: pointer; }}
+        nav button.active {{ background: #214f7a; color: #fff; }}
+        .view {{ display: none; }}
+        .view.active {{ display: block; }}
+        .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-bottom: 18px; }}
+        .card {{ background: #fff; border-radius: 16px; padding: 16px; box-shadow: 0 10px 24px rgba(16, 36, 64, 0.08); }}
+        h2, h3 {{ margin-top: 0; }}
+        textarea, input, select {{ width: 100%; box-sizing: border-box; border: 1px solid #c8d3dd; border-radius: 10px; padding: 10px 12px; background: #fff; }}
+        label {{ display: block; margin-bottom: 10px; font-size: 14px; color: #425466; }}
+        .row {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }}
+        .actions {{ display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }}
+        .actions button {{ border: 0; border-radius: 10px; padding: 10px 14px; background: #214f7a; color: #fff; cursor: pointer; }}
+        .actions button.secondary {{ background: #697b8c; }}
+        table {{ width: 100%; border-collapse: collapse; }}
+        th, td {{ text-align: left; padding: 10px 8px; border-bottom: 1px solid #e5ecf2; font-size: 14px; }}
+        .muted {{ color: #66788a; font-size: 13px; }}
+        .status {{ font-weight: 600; }}
+        .notice {{ position: fixed; top: 18px; right: 18px; max-width: 360px; padding: 12px 14px; border-radius: 12px; color: #fff; box-shadow: 0 10px 24px rgba(16, 36, 64, 0.2); opacity: 0; transform: translateY(-8px); pointer-events: none; transition: opacity 0.2s ease, transform 0.2s ease; z-index: 1000; }}
+        .notice.visible {{ opacity: 1; transform: translateY(0); }}
+        .notice.success {{ background: #117a4f; }}
+        .notice.error {{ background: #b42318; }}
+        pre {{ white-space: pre-wrap; word-break: break-word; background: #f7fafc; padding: 12px; border-radius: 12px; }}
+    </style>
+</head>
+<body>
+    <div id="saveNotice" class="notice" aria-live="polite"></div>
+    <header>
+        <h1 style=\"margin:0 0 6px 0;\">{status['config']['ui']['title']}</h1>
+        <div class=\"muted\" style=\"color:#d6e4f0;\">Изолированный loopback UI для VLESS+REALITY+Vision и fail2ban</div>
+    </header>
+    <main>
+        <nav>
+            <button class=\"active\" data-target=\"sni\">Управление SNI</button>
+            <button data-target=\"fail2ban\">Fail2ban</button>
+        </nav>
+
+        <section id=\"sni\" class=\"view active\">
+            <div class=\"grid\">
+                <div class=\"card\"><h3>Текущий target</h3><div id=\"currentTarget\">-</div></div>
+                <div class=\"card\"><h3>Текущий slot serverNames</h3><div id=\"currentServerNames\">-</div></div>
+                <div class=\"card\"><h3>Последняя ротация</h3><div id=\"lastRotation\">-</div></div>
+                <div class=\"card\"><h3>Таймер</h3><div id=\"timerState\">-</div></div>
+                <div class=\"card\"><h3>Fail2ban</h3><div id=\"fail2banSummary\">-</div></div>
+            </div>
+            <div class=\"card\">
+                <h2>Управление ротацией</h2>
+                <div class=\"row\">
+                    <label>Включить ротацию
+                        <select id=\"rotationEnabled\">
+                            <option value=\"true\">Включено</option>
+                            <option value=\"false\">Выключено</option>
+                        </select>
+                    </label>
+                    <label>Число slot-профилей
+                        <input id=\"rotationWindowSize\" type=\"number\" min=\"1\" step=\"1\">
+                        <div class=\"muted\">Сколько последних ротаций держать как отдельные slot-inbound-ы с собственными target/serverNames и портами.</div>
+                    </label>
+                    <label>OnCalendar
+                        <input id=\"rotationSchedule\" placeholder=\"*-*-* 03:30:00\">
+                    </label>
+                </div>
+                <div class=\"actions\">
+                    <button id=\"saveRotation\">Сохранить настройки</button>
+                    <button id=\"runRotation\" class=\"secondary\">Запустить ротацию сейчас</button>
+                </div>
+            </div>
+            <div class=\"card\" style=\"margin-top:16px;\">
+                <h2>Список Reality SNI / target</h2>
+                <div class=\"muted\">Каждая строка: <code>host</code> или <code>target:443 | sni1,sni2</code>.</div>
+                <textarea id=\"sniList\" rows=\"14\"></textarea>
+                <div class=\"actions\">
+                    <button id=\"saveSniList\">Сохранить список</button>
+                </div>
+            </div>
+            <div class=\"card\" style=\"margin-top:16px;\">
+                <h2>Управляемые inbound-ы</h2>
+                <table>
+                    <thead><tr><th>ID</th><th>Remark</th><th>Port</th><th>Target</th><th>serverNames</th></tr></thead>
+                    <tbody id=\"managedInbounds\"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section id=\"fail2ban\" class=\"view\">
+            <div class=\"grid\" id=\"fail2banCards\"></div>
+            <div class=\"card\">
+                <h2>Настройки jail</h2>
+                <div id=\"fail2banSettings\"></div>
+                <div class=\"actions\"><button id=\"saveFail2ban\">Сохранить fail2ban</button></div>
+            </div>
+            <div class=\"card\" style=\"margin-top:16px;\">
+                <h2>Текущие активные баны</h2>
+                <table>
+                    <thead><tr><th>Jail</th><th>IP</th><th>Ban count</th><th>Истекает</th></tr></thead>
+                    <tbody id=\"currentBans\"></tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+    <script>
+        let appState = null;
+        let noticeTimer = null;
+
+        async function request(path, options) {{
+            const response = await fetch(path, options);
+            const data = await response.json();
+            if (!response.ok) {{
+                throw new Error(data.error || 'request failed');
+            }}
+            return data;
+        }}
+        function showNotice(message, kind = 'success') {{
+            const notice = document.getElementById('saveNotice');
+            notice.textContent = message;
+            notice.className = `notice ${{kind}} visible`;
+            clearTimeout(noticeTimer);
+            noticeTimer = setTimeout(() => {{
+                notice.classList.remove('visible');
+            }}, 3200);
+        }}
+
+        async function runActionWithFeedback(action, successMessage) {{
+            try {{
+                await action();
+                showNotice(successMessage, 'success');
+            }} catch (error) {{
+                showNotice(error.message || 'Операция завершилась с ошибкой', 'error');
+            }}
+        }}
+
+        function setActiveView(name) {{
+            document.querySelectorAll('nav button').forEach((button) => {{
+                button.classList.toggle('active', button.dataset.target === name);
+            }});
+            document.querySelectorAll('.view').forEach((view) => {{
+                view.classList.toggle('active', view.id === name);
+            }});
+        }}
+
+        function renderStatus() {{
+            const state = appState.state || {{}};
+            const entry = state.current_entry || {{}};
+            document.getElementById('currentTarget').textContent = entry.target || '-';
+            document.getElementById('currentServerNames').textContent = (state.effective_server_names || entry.server_names || []).join(', ') || '-';
+            document.getElementById('lastRotation').textContent = state.last_rotation_at || '-';
+            const timer = appState.timer || {{}};
+            document.getElementById('timerState').textContent = `${{timer.ActiveState || '-'}} / next=${{timer.NextElapseUSecRealtime || '-'}}`;
+            const counts = appState.fail2ban.counts || {{}};
+            const totalBans = Object.values(counts).reduce((sum, value) => sum + value, 0);
+            const jailSummary = Object.entries(counts).map(([jail, value]) => `${{jail}}: ${{value}}`).join(', ');
+            document.getElementById('fail2banSummary').textContent = totalBans ? `${{totalBans}} активных банов${{jailSummary ? ` (${{jailSummary}})` : ''}}` : 'Активных банов нет';
+            document.getElementById('rotationEnabled').value = String(!!appState.config.rotation.enabled);
+            document.getElementById('rotationSchedule').value = appState.config.rotation.on_calendar || '';
+            document.getElementById('rotationWindowSize').value = appState.config.rotation.window_size || 1;
+            document.getElementById('sniList').value = appState.entries.map((entry) => `${{entry.target}} | ${{entry.server_names.join(',')}}`).join('\\n');
+
+            const tbody = document.getElementById('managedInbounds');
+            tbody.innerHTML = '';
+            (appState.managed_inbounds || []).forEach((item) => {{
+                const row = document.createElement('tr');
+                row.innerHTML = `<td>${{item.id}}</td><td>${{item.remark || ''}}</td><td>${{item.port || ''}}</td><td>${{item.target || ''}}</td><td>${{(item.server_names || []).join(', ')}}</td>`;
+                tbody.appendChild(row);
+            }});
+        }}
+
+        function renderFail2ban() {{
+            const cards = document.getElementById('fail2banCards');
+            cards.innerHTML = '';
+            const counts = appState.fail2ban.counts || {{}};
+            Object.keys(appState.fail2ban.settings || {{}}).forEach((jail) => {{
+                const card = document.createElement('div');
+                card.className = 'card';
+                card.innerHTML = `<h3>${{jail}}</h3><div class=\"status\">Активных банов: ${{counts[jail] || 0}}</div>`;
+                cards.appendChild(card);
+            }});
+
+            const settingsRoot = document.getElementById('fail2banSettings');
+            settingsRoot.innerHTML = '';
+            Object.entries(appState.fail2ban.settings || {{}}).forEach(([jail, settings]) => {{
+                const wrapper = document.createElement('div');
+                wrapper.className = 'card';
+                wrapper.style.marginBottom = '12px';
+                wrapper.innerHTML = `
+                    <h3>${{jail}}</h3>
+                    <div class=\"row\">
+                        <label>Bantime<input data-jail=\"${{jail}}\" data-field=\"bantime\" value=\"${{settings.bantime || ''}}\"></label>
+                        <label>Findtime<input data-jail=\"${{jail}}\" data-field=\"findtime\" value=\"${{settings.findtime || ''}}\"></label>
+                        <label>Maxretry<input data-jail=\"${{jail}}\" data-field=\"maxretry\" value=\"${{settings.maxretry || ''}}\"></label>
+                    </div>
+                `;
+                settingsRoot.appendChild(wrapper);
+            }});
+
+            const bans = document.getElementById('currentBans');
+            bans.innerHTML = '';
+            (appState.fail2ban.current_bans || []).forEach((item) => {{
+                const row = document.createElement('tr');
+                row.innerHTML = `<td>${{item.jail}}</td><td>${{item.ip}}</td><td>${{item.bancount}}</td><td>${{item.expires_at || 'permanent'}}</td>`;
+                bans.appendChild(row);
+            }});
+        }}
+
+        async function reloadState() {{
+            appState = await request('/api/status');
+            renderStatus();
+            renderFail2ban();
+        }}
+
+        async function saveRotation() {{
+            await request('/api/rotation/settings', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{
+                    enabled: document.getElementById('rotationEnabled').value === 'true',
+                    on_calendar: document.getElementById('rotationSchedule').value.trim(),
+                    window_size: Number(document.getElementById('rotationWindowSize').value || '1'),
+                }}),
+            }});
+            await reloadState();
+        }}
+
+        async function runRotation() {{
+            await request('/api/rotation/run', {{method: 'POST'}});
+            await reloadState();
+        }}
+
+        async function saveSniList() {{
+            await request('/api/sni-list', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{text: document.getElementById('sniList').value}}),
+            }});
+            await reloadState();
+        }}
+
+        async function saveFail2ban() {{
+            const payload = {{}};
+            document.querySelectorAll('#fail2banSettings input').forEach((input) => {{
+                const jail = input.dataset.jail;
+                const field = input.dataset.field;
+                if (!payload[jail]) payload[jail] = {{}};
+                payload[jail][field] = input.value.trim();
+            }});
+            await request('/api/fail2ban/settings', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify(payload),
+            }});
+            await reloadState();
+        }}
+
+        document.querySelectorAll('nav button').forEach((button) => {{
+            button.addEventListener('click', () => setActiveView(button.dataset.target));
+        }});
+        document.getElementById('saveRotation').addEventListener('click', () => runActionWithFeedback(saveRotation, 'Настройки ротации сохранены'));
+        document.getElementById('runRotation').addEventListener('click', () => runActionWithFeedback(runRotation, 'Ротация выполнена'));
+        document.getElementById('saveSniList').addEventListener('click', () => runActionWithFeedback(saveSniList, 'Список SNI сохранён'));
+        document.getElementById('saveFail2ban').addEventListener('click', () => runActionWithFeedback(saveFail2ban, 'Настройки fail2ban сохранены'));
+        reloadState().catch((error) => showNotice(error.message || 'Не удалось загрузить интерфейс', 'error'));
+    </script>
+</body>
+</html>"""
+{% endraw %}
+
+
+class Handler(BaseHTTPRequestHandler):
+    app = None
+
+    def _read_json(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = self.rfile.read(length) if length else b"{}"
+        return json.loads(payload.decode("utf-8"))
+
+    def _send(self, status_code, payload, content_type="application/json; charset=utf-8", extra_headers=None):
+        body = payload.encode("utf-8") if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", content_type)
+        if extra_headers:
+            for key, value in extra_headers.items():
+                self.send_header(key, value)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _require_auth(self):
+        if self.app.verify_authorization_header(self.headers.get("Authorization", "")):
+            return True
+        self._send(
+            401,
+            {"error": "unauthorized"},
+            extra_headers={"WWW-Authenticate": f'Basic realm="{self.app.auth_realm()}"'},
+        )
+        return False
+
+    def do_GET(self):
+        try:
+            parsed = urlparse(self.path)
+            if parsed.path == "/healthz":
+                self._send(200, {"ok": True})
+                return
+            if not self._require_auth():
+                return
+            if parsed.path == "/":
+                status = self.app.build_status()
+                self._send(200, html_page(status), "text/html; charset=utf-8")
+                return
+            if parsed.path == "/api/status":
+                self._send(200, self.app.build_status())
+                return
+            self._send(404, {"error": "not found"})
+        except Exception as error:
+            self._send(500, {"error": str(error)})
+
+    def do_POST(self):
+        try:
+            parsed = urlparse(self.path)
+            if not self._require_auth():
+                return
+            if parsed.path == "/api/rotation/run":
+                self._send(200, {"state": rotate_now(self.app.config, force_new=True)})
+                return
+            if parsed.path == "/api/rotation/settings":
+                payload = self._read_json()
+                config = self.app.config
+                config["rotation"]["enabled"] = bool(payload.get("enabled"))
+                schedule = (payload.get("on_calendar") or "").strip()
+                if not schedule:
+                    raise ValueError("Нужно передать OnCalendar")
+                config["rotation"]["window_size"] = payload.get("window_size", config["rotation"].get("window_size", 1))
+                config["rotation"]["window_size"] = normalize_window_size(config)
+                config["rotation"]["on_calendar"] = schedule
+                validate_rotation_slots(config)
+                reconcile_sni_list(config, read_sni_entries(config["sni_list_path"]))
+                write_json(self.app.config_path, config)
+                set_timer_state(config, config["rotation"]["enabled"])
+                append_log(config["runtime_log_path"], f"rotation settings updated: enabled={config['rotation']['enabled']} on_calendar={schedule} window_size={config['rotation']['window_size']}")
+                self._send(200, {"ok": True})
+                return
+            if parsed.path == "/api/sni-list":
+                payload = self._read_json()
+                text = payload.get("text", "")
+                entries = parse_sni_entries_text(text)
+                Path(self.app.config["sni_list_path"]).write_text(text.strip() + "\n", encoding="utf-8")
+                state = reconcile_sni_list(self.app.config, entries)
+                append_log(self.app.config["runtime_log_path"], "sni list updated")
+                self._send(200, {"ok": True, "state": state})
+                return
+            if parsed.path == "/api/fail2ban/settings":
+                payload = self._read_json()
+                for jail, settings in payload.items():
+                    if not isinstance(settings, dict):
+                        raise ValueError(f"Некорректные настройки jail: {jail}")
+                    int(settings.get("maxretry", "0"))
+                write_fail2ban_override(self.app.config, payload)
+                self._send(200, {"ok": True})
+                return
+            self._send(404, {"error": "not found"})
+        except Exception as error:
+            self._send(500, {"error": str(error)})
+
+    def log_message(self, fmt, *args):
+        append_log(self.app.config["runtime_log_path"], fmt % args)
+
+
+def serve(config_path):
+    app = App(config_path)
+    config = app.config
+    try:
+        entries = read_sni_entries(config["sni_list_path"])
+        with ROTATION_LOCK:
+            connection = sqlite3.connect(config["xui_db_path"])
+            connection.row_factory = sqlite3.Row
+            try:
+                deleted = prune_extra_slot_inbounds(connection, config)
+                if deleted:
+                    run_command(["systemctl", "restart", config["xui_service_unit"]])
+                    append_log(config["runtime_log_path"], f"startup prune: deleted slot inbounds on ports {deleted}")
+            finally:
+                connection.close()
+    except Exception as exc:
+        append_log(config["runtime_log_path"], f"startup prune skipped: {exc}")
+    handler = type("AppHandler", (Handler,), {})
+    handler.app = app
+    server = ThreadingHTTPServer((config["listen_host"], int(config["listen_port"])), handler)
+
+    tls_cfg = config.get("tls") or {}
+    if bool(tls_cfg.get("enabled", True)):
+        cert_path = tls_cfg.get("cert_path") or ""
+        key_path = tls_cfg.get("key_path") or ""
+        if not cert_path or not key_path:
+            raise RuntimeError("В config.json не заданы tls.cert_path и tls.key_path")
+        if not Path(cert_path).exists() or not Path(key_path).exists():
+            raise RuntimeError(f"TLS-файлы не найдены: cert={cert_path} key={key_path}")
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certfile=cert_path, keyfile=key_path)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        append_log(config["runtime_log_path"], f"UI listening on https://{config['listen_host']}:{config['listen_port']}")
+    else:
+        append_log(config["runtime_log_path"], f"UI listening on http://{config['listen_host']}:{config['listen_port']}")
+
+    server.serve_forever()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", choices=["serve", "rotate"])
+    parser.add_argument("--config", required=True)
+    args = parser.parse_args()
+    config = load_config(args.config)
+    if args.command == "serve":
+        serve(args.config)
+        return
+    if not config["rotation"]["enabled"]:
+        append_log(config["rotation_log_path"], "rotation skipped because disabled")
+        return
+    rotate_now(config)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        raise

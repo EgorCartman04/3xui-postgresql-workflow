@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+db_path="{{ xui_db_path }}"
+state_dir="{{ xui_port_sync_state_dir }}"
+state_file="${state_dir}/managed-rules.txt"
+tmp_file="$(mktemp)"
+current_rules_file="$(mktemp)"
+managed_rules_file="$(mktemp)"
+numbered_rules_file="$(mktemp)"
+lock_file="{{ xui_port_sync_lock_file }}"
+
+mkdir -p "${state_dir}"
+touch "${state_file}"
+
+cleanup() {
+  rm -f "${tmp_file}" "${current_rules_file}" "${managed_rules_file}" "${numbered_rules_file}"
+}
+trap cleanup EXIT
+
+exec 9>"${lock_file}"
+# Если service/path/timer сработали почти одновременно, ждём lock ограниченное время,
+# чтобы второй запуск не завершался мгновенно и не создавал ложные провалы проверок.
+flock -w {{ xui_port_sync_lock_wait_seconds | default(15) }} 9 || exit 0
+
+if [[ ! -f "${db_path}" ]]; then
+  echo "База 3x-ui не найдена: ${db_path}" >&2
+  exit 0
+fi
+
+supports_transport() {
+  local protocol="$1"
+  local stream_settings="$2"
+  local settings="$3"
+  local network=''
+  local security=''
+  local udp_enabled='false'
+
+  if [[ -n "${stream_settings}" && "${stream_settings}" != "null" ]]; then
+    network="$(jq -r 'try .network catch ""' <<< "${stream_settings}" 2>/dev/null || true)"
+    security="$(jq -r 'try .security catch ""' <<< "${stream_settings}" 2>/dev/null || true)"
+  fi
+
+  if [[ -n "${settings}" && "${settings}" != "null" ]]; then
+    udp_enabled="$(jq -r 'try .udp catch false' <<< "${settings}" 2>/dev/null || echo false)"
+  fi
+
+  case "${protocol}" in
+    hysteria|hysteria2|wireguard)
+      printf 'udp\n'
+      ;;
+    shadowsocks)
+      case "$(jq -r 'try .network catch "tcp"' <<< "${settings}" 2>/dev/null || echo tcp)" in
+        udp)
+          printf 'udp\n'
+          ;;
+        tcp,udp|udp,tcp)
+          printf 'tcp\nudp\n'
+          ;;
+        *)
+          printf 'tcp\n'
+          ;;
+      esac
+      ;;
+    mixed)
+      printf 'tcp\n'
+      if [[ "${udp_enabled}" == "true" ]]; then
+        printf 'udp\n'
+      fi
+      ;;
+    *)
+      if [[ "${protocol}" == "vless" && "${security}" == "reality" ]]; then
+        printf 'tcp\nudp\n'
+      elif [[ "${network}" == "kcp" ]]; then
+        printf 'udp\n'
+      else
+        printf 'tcp\n'
+      fi
+      ;;
+  esac
+}
+
+{
+{% for port in xui_firewall_allowed_tcp_ports %}
+{% if (port | string) != (xui_panel_port | string) and (port | string) != (xui_sub_port | string) %}
+  printf '%s/tcp\n' '{{ port }}'
+{% endif %}
+{% endfor %}
+
+  sub_port_db="$(sqlite3 -readonly "${db_path}" \
+    "SELECT value FROM settings WHERE key='subPort' LIMIT 1;" 2>/dev/null || true)"
+  if [[ -n "${sub_port_db}" && "${sub_port_db}" =~ ^[0-9]+$ ]]; then
+    printf '%s/tcp\n' "${sub_port_db}"
+  fi
+
+  sqlite3 -readonly -tabs "${db_path}" \
+    "SELECT port, protocol, COALESCE(json(NULLIF(stream_settings, '')), ''), COALESCE(json(NULLIF(settings, '')), '') FROM inbounds WHERE enable = 1;" | \
+  while IFS=$'\t' read -r port protocol stream_settings settings; do
+    [[ -n "${port}" ]] || continue
+    while IFS= read -r transport; do
+      [[ -n "${transport}" ]] || continue
+      printf '%s/%s\n' "${port}" "${transport}"
+    done < <(supports_transport "${protocol}" "${stream_settings}" "${settings}")
+  done
+} | sort -u > "${tmp_file}"
+
+LC_ALL=C ufw status | awk '
+  $1 ~ /^[0-9]+\/(tcp|udp)$/ {
+    print $1
+  }
+' | sort -u > "${current_rules_file}"
+
+LC_ALL=C ufw status | awk '
+  index($0, "# {{ xui_port_sync_comment }}") && $1 ~ /^[0-9]+\/(tcp|udp)$/ {
+    print $1
+  }
+' | sort -u > "${managed_rules_file}"
+
+LC_ALL=C ufw status numbered > "${numbered_rules_file}"
+
+while IFS= read -r rule; do
+  [[ -n "${rule}" ]] || continue
+  if grep -Fxq "${rule}" "${current_rules_file}" && ! grep -Fxq "${rule}" "${managed_rules_file}"; then
+    while true; do
+      rule_num="$(awk -v target="${rule}" -v comment="# {{ xui_port_sync_comment }}" '
+        index($0, comment) == 0 {
+          if ($0 ~ ("(^|[[:space:]])" target "([[:space:]]|$)")) {
+            line = $0
+            sub(/^\[[[:space:]]*/, "", line)
+            sub(/\].*$/, "", line)
+            gsub(/[[:space:]]/, "", line)
+            print line
+            exit
+          }
+        }
+      ' "${numbered_rules_file}")"
+      [[ -n "${rule_num}" ]] || break
+      ufw --force delete "${rule_num}" > /dev/null
+      LC_ALL=C ufw status numbered > "${numbered_rules_file}"
+    done
+    ufw allow "${rule}" comment '{{ xui_port_sync_comment }}' > /dev/null
+  fi
+done < "${tmp_file}"
+
+LC_ALL=C ufw status | awk '
+  $1 ~ /^[0-9]+\/(tcp|udp)$/ {
+    print $1
+  }
+' | sort -u > "${current_rules_file}"
+
+LC_ALL=C ufw status | awk '
+  index($0, "# {{ xui_port_sync_comment }}") && $1 ~ /^[0-9]+\/(tcp|udp)$/ {
+    print $1
+  }
+' | sort -u > "${managed_rules_file}"
+
+while IFS= read -r rule; do
+  [[ -n "${rule}" ]] || continue
+  if ! grep -Fxq "${rule}" "${current_rules_file}"; then
+    ufw allow "${rule}" comment '{{ xui_port_sync_comment }}' > /dev/null
+  fi
+done < "${tmp_file}"
+
+while IFS= read -r rule; do
+  [[ -n "${rule}" ]] || continue
+  if ! grep -Fxq "${rule}" "${tmp_file}"; then
+    ufw --force delete allow "${rule}" comment '{{ xui_port_sync_comment }}' > /dev/null || true
+  fi
+done < "${managed_rules_file}"
+
+install -m 0600 "${tmp_file}" "${state_file}"

@@ -1,0 +1,41 @@
+3x-ui production access note
+============================
+
+Панель через SSH-туннель:
+{{ xui_panel_tunnel_url }}
+
+Каноническое доменное имя панели и сертификата:
+{{ xui_panel_public_url }}
+
+Канонический публичный URL subscription server:
+{{ xui_sub_public_url }}
+
+Сервер:
+{{ xui_server_ip }}
+
+Домен:
+{{ xui_domain }}
+
+SSH-туннель:
+ssh -i /path/to/private_key -L {{ xui_panel_tunnel_local_port }}:127.0.0.1:{{ xui_panel_port }} root@{{ xui_server_ip }}
+
+Решения по безопасности:
+- Для панели и подписок выбран DNS, а не IP. Это даёт нормальный доменный Let's Encrypt сертификат с автопродлением и не привязывает клиентские ссылки к сырому IP.
+- Панель слушает только `127.0.0.1:{{ xui_panel_port }}` и не публикуется наружу напрямую.
+- Внешний UFW-доступ к порту панели удалён; управление панелью выполняется через SSH-туннель.
+- Панель закрыта длинным base path `{{ xui_panel_base_path }}`.
+- SSH оставляет вход по паролю, но параллельно включает вход по ключу.
+- Fail2ban защищает sshd, recidive и форму входа 3x-ui.
+- UFW открыт только для 22/tcp и 80/tcp.
+- Дополнительно включены unattended-upgrades, chrony и ежедневный backup.
+
+Что стоит сделать после первого входа:
+- Вручную включить 2FA в настройках панели.
+- Для переключения режима доступа панели на сервере используй `{{ xui_server_panel_access_script_path }}` (меню: `Panel via tunnel` / `Direct panel access`).
+- Если включён `Direct panel access`, timer `3xui-panel-access-guard.timer` автоматически вернёт панель в `Panel via tunnel` спустя {{ xui_panel_direct_max_seconds }} секунд.
+- Панель можно открывать напрямую как `https://127.0.0.1:{{ xui_panel_tunnel_local_port }}/{{ xui_panel_base_path }}/` после поднятия SSH-туннеля из любого браузера.
+- Панель также можно открывать как `https://{{ xui_domain }}:{{ xui_panel_tunnel_local_port }}/{{ xui_panel_base_path }}/` поверх того же SSH-туннеля.
+- Если нужен доменный адрес без локальной правки `/etc/hosts`, на macOS самый простой способ: сначала поднять туннель `./scripts/tunnel.sh`, затем открыть URL через `./scripts/tunnel.sh open-domain`.
+- Если понадобится генерировать ручные share-ссылки из UI, делай это из окна, открытого по DNS-имени `{{ xui_domain }}`, а не по `127.0.0.1`.
+- Создавать клиентские подписки и публичные ссылки только на DNS-имя {{ xui_domain }}, а не на {{ xui_server_ip }}.
+- Перед добавлением inbound-ов проверить, какие порты действительно нужны снаружи, и открыть их отдельно.

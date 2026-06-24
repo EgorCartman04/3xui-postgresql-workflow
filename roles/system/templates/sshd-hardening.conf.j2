@@ -1,0 +1,16 @@
+# Управляется Ansible.
+PubkeyAuthentication yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PermitEmptyPasswords no
+PermitRootLogin yes
+MaxAuthTries 3
+LoginGraceTime 30
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding local
+PermitOpen {{ xui_sshd_permit_open_targets | join(' ') }}
+ClientAliveInterval 300
+ClientAliveCountMax 2
+UseDNS no

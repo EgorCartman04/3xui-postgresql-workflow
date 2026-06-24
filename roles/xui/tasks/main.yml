@@ -1,0 +1,516 @@
+---
+- name: Определить поддерживаемую архитектуру релиза 3x-ui
+  ansible.builtin.set_fact:
+    xui_release_arch: "{{ xui_arch_map[ansible_facts['architecture']] | default('unsupported') }}"
+  vars:
+    xui_arch_map:
+      x86_64: amd64
+      aarch64: arm64
+
+- name: Проверить поддержку архитектуры сервером
+  ansible.builtin.assert:
+    that:
+      - xui_release_arch != 'unsupported'
+    fail_msg: "Для этой архитектуры playbook пока не описан."
+
+- name: Проверить текущую версию 3x-ui
+  ansible.builtin.command: "{{ xui_install_dir }}/x-ui -v"
+  register: xui_current_version
+  failed_when: false
+  changed_when: false
+
+- name: Нормализовать ожидаемую версию 3x-ui для сравнения
+  ansible.builtin.set_fact:
+    xui_expected_version: "{{ xui_version | regex_replace('^v', '') }}"
+
+- name: Нормализовать текущую версию 3x-ui для сравнения
+  ansible.builtin.set_fact:
+    xui_current_version_normalized: "{{ xui_current_version.stdout | regex_search('[0-9]+\\.[0-9]+\\.[0-9]+') | default('', true) }}"
+
+- name: Запретить неявный downgrade 3x-ui
+  ansible.builtin.assert:
+    that:
+      - xui_force_downgrade | bool or xui_current_version.rc != 0 or xui_current_version_normalized == '' or (xui_current_version_normalized is version(xui_expected_version, '<='))
+    fail_msg: >-
+      Защита от неявного downgrade: на сервере установлена более новая версия 3x-ui
+      ({{ xui_current_version_normalized }}), чем целевая из inventory ({{ xui_expected_version }}).
+
+- name: Скачать архив релиза 3x-ui
+  ansible.builtin.get_url:
+    url: "https://github.com/MHSanaei/3x-ui/releases/download/{{ xui_version }}/x-ui-linux-{{ xui_release_arch }}.tar.gz"
+    dest: "/tmp/x-ui-linux-{{ xui_release_arch }}.tar.gz"
+    mode: "0644"
+  when: xui_current_version.rc != 0 or xui_expected_version not in xui_current_version.stdout
+
+- name: Остановить текущий x-ui перед обновлением
+  ansible.builtin.service:
+    name: "{{ xui_service_name }}"
+    state: stopped
+  failed_when: false
+  when: xui_current_version.rc == 0 and (xui_expected_version not in xui_current_version.stdout)
+
+- name: Удалить старую директорию 3x-ui перед переустановкой
+  ansible.builtin.file:
+    path: "{{ xui_install_dir }}"
+    state: absent
+  when: xui_current_version.rc != 0 or xui_expected_version not in xui_current_version.stdout
+
+- name: Распаковать релиз 3x-ui
+  ansible.builtin.unarchive:
+    src: "/tmp/x-ui-linux-{{ xui_release_arch }}.tar.gz"
+    dest: /usr/local
+    remote_src: true
+  when: xui_current_version.rc != 0 or xui_expected_version not in xui_current_version.stdout
+
+- name: Привести владельца директории 3x-ui к root
+  ansible.builtin.file:
+    path: "{{ xui_install_dir }}"
+    state: directory
+    owner: root
+    group: root
+    recurse: true
+  when: xui_current_version.rc != 0 or xui_expected_version not in xui_current_version.stdout
+
+- name: Установить исполняемые права на бинарники 3x-ui
+  ansible.builtin.file:
+    path: "{{ item }}"
+    mode: "0755"
+    owner: root
+    group: root
+  loop:
+    - "{{ xui_install_dir }}/x-ui"
+    - "{{ xui_install_dir }}/x-ui.sh"
+  when: xui_current_version.rc != 0 or xui_expected_version not in xui_current_version.stdout
+
+- name: Установить cli-скрипт x-ui в /usr/bin
+  ansible.builtin.copy:
+    src: "{{ xui_install_dir }}/x-ui.sh"
+    dest: /usr/bin/x-ui
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  when: xui_current_version.rc != 0 or xui_expected_version not in xui_current_version.stdout
+
+- name: Установить systemd unit x-ui
+  ansible.builtin.copy:
+    src: "{{ xui_install_dir }}/x-ui.service.debian"
+    dest: /etc/systemd/system/x-ui.service
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart x-ui
+  when: xui_current_version.rc != 0 or xui_expected_version not in xui_current_version.stdout
+
+- name: Создать каталог systemd drop-in для x-ui
+  ansible.builtin.file:
+    path: /etc/systemd/system/x-ui.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Применить лимит файловых дескрипторов для x-ui
+  ansible.builtin.template:
+    src: x-ui-limits.conf.j2
+    dest: /etc/systemd/system/x-ui.service.d/10-limits.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart x-ui
+
+- name: Создать каталог логов x-ui
+  ansible.builtin.file:
+    path: /var/log/x-ui
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Настроить панель с PostgreSQL через x-ui CLI
+  ansible.builtin.command:
+    argv:
+      - "{{ xui_install_dir }}/x-ui"
+      - setting
+      - -username
+      - "{{ xui_admin_username }}"
+      - -password
+      - "{{ xui_admin_password }}"
+      - -port
+      - "{{ xui_panel_port | string }}"
+      - -webBasePath
+      - "{{ xui_panel_base_path }}"
+      - -listenIP
+      - "{{ xui_panel_listen_ip }}"
+      - -dbType
+      - "{{ xui_db_type }}"
+      - -dbHost
+      - "{{ xui_db_host }}"
+      - -dbPort
+      - "{{ xui_db_port | string }}"
+      - -dbName
+      - "{{ xui_db_name }}"
+      - -dbUser
+      - "{{ xui_db_user }}"
+      - -dbPassword
+      - "{{ xui_db_password }}"
+  notify: Restart x-ui
+  register: xui_panel_pg_config
+  changed_when: true
+
+- name: Остановить x-ui перед миграцией
+  ansible.builtin.service:
+    name: "{{ xui_service_name }}"
+    state: stopped
+  failed_when: false
+
+- name: Выполнить миграции 3x-ui (создание схемы в PostgreSQL)
+  ansible.builtin.command: "{{ xui_install_dir }}/x-ui migrate"
+  changed_when: false
+
+- name: Включить и запустить сервис x-ui
+  ansible.builtin.systemd:
+    name: "{{ xui_service_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Применить настройки XRAY (policy + DNS)
+  ansible.builtin.import_tasks: xray-policy.yml
+
+- name: Создать каталог состояния синхронизации портов 3x-ui
+  ansible.builtin.file:
+    path: "{{ xui_port_sync_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  tags: [port-sync]
+
+- name: Установить скрипт синхронизации UFW с inbound-портами 3x-ui
+  ansible.builtin.template:
+    src: 3x-ui-port-sync.sh.j2
+    dest: /usr/local/sbin/3x-ui-port-sync.sh
+    owner: root
+    group: root
+    mode: "0750"
+  notify: Run 3x-ui port sync
+  tags: [port-sync]
+
+- name: Установить systemd service синхронизации портов 3x-ui
+  ansible.builtin.template:
+    src: 3x-ui-port-sync.service.j2
+    dest: /etc/systemd/system/3x-ui-port-sync.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart 3x-ui port sync path
+    - Restart 3x-ui port sync timer
+    - Run 3x-ui port sync
+  tags: [port-sync]
+
+- name: Установить systemd path для отслеживания изменений базы 3x-ui
+  ansible.builtin.template:
+    src: 3x-ui-port-sync.path.j2
+    dest: /etc/systemd/system/3x-ui-port-sync.path
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart 3x-ui port sync path
+  tags: [port-sync]
+
+- name: Установить systemd timer для периодической синхронизации портов 3x-ui
+  ansible.builtin.template:
+    src: 3x-ui-port-sync.timer.j2
+    dest: /etc/systemd/system/3x-ui-port-sync.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart 3x-ui port sync timer
+  tags: [port-sync]
+
+- name: Включить и запустить path-мониторинг портов 3x-ui
+  ansible.builtin.systemd:
+    name: 3x-ui-port-sync.path
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags: [port-sync]
+
+- name: Включить и запустить timer синхронизации портов 3x-ui
+  ansible.builtin.systemd:
+    name: 3x-ui-port-sync.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags: [port-sync]
+
+- name: Выполнить первичную синхронизацию UFW с inbound-портами 3x-ui
+  ansible.builtin.systemd:
+    name: 3x-ui-port-sync.service
+    state: started
+  tags: [port-sync]
+
+- name: Определить путь acme.sh
+  ansible.builtin.shell: |
+    set -eu
+    if [ -e /root/.acme.sh/acme.sh ]; then
+      echo /root/.acme.sh/acme.sh
+      exit 0
+    fi
+    found_path="$(find /root -maxdepth 6 \\( -type f -o -type l \\) -name acme.sh 2>/dev/null | head -n 1 || true)"
+    if [ -n "${found_path}" ]; then
+      echo "${found_path}"
+      exit 0
+    fi
+    if command -v acme.sh >/dev/null 2>&1; then
+      command -v acme.sh
+      exit 0
+    fi
+    echo ""
+  register: xui_acme_path_cmd
+  changed_when: false
+
+- name: Зафиксировать обнаруженный путь acme.sh
+  ansible.builtin.set_fact:
+    xui_acme_sh_path: "{{ xui_acme_path_cmd.stdout | trim }}"
+
+- name: Установить acme.sh на сервере
+  ansible.builtin.shell: |
+    set -eu
+    tmp_acme_install_dir="$(mktemp -d /tmp/acme.sh.XXXXXX)"
+    curl -fSL https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh -o "${tmp_acme_install_dir}/acme.sh"
+    chmod 0755 "${tmp_acme_install_dir}/acme.sh"
+    cd "${tmp_acme_install_dir}"
+    sh ./acme.sh --install --force
+  changed_when: true
+  when: xui_acme_sh_path | length == 0
+
+- name: Проверить установку acme.sh после инсталляции
+  ansible.builtin.stat:
+    path: /root/.acme.sh/acme.sh
+  register: xui_acme_home_install_stat
+  when: xui_acme_sh_path | length == 0
+
+- name: Зафиксировать путь acme.sh после установки
+  ansible.builtin.set_fact:
+    xui_acme_sh_path: /root/.acme.sh/acme.sh
+  when:
+    - xui_acme_sh_path | length == 0
+    - xui_acme_home_install_stat.stat.exists | default(false)
+
+- name: Выставить исполняемые права на acme.sh
+  ansible.builtin.file:
+    path: "{{ xui_acme_sh_path }}"
+    mode: "0755"
+  when: xui_acme_sh_path | length > 0
+
+- name: Проверить наличие сертификата панели
+  ansible.builtin.stat:
+    path: "{{ xui_panel_cert_dir }}/fullchain.pem"
+  register: xui_panel_fullchain
+
+- name: Проверить наличие приватного ключа панели
+  ansible.builtin.stat:
+    path: "{{ xui_panel_cert_dir }}/privkey.pem"
+  register: xui_panel_privkey
+
+- name: Создать каталог сертификатов панели
+  ansible.builtin.file:
+    path: "{{ xui_panel_cert_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Выпустить и установить доменный сертификат для панели
+  when: not xui_panel_fullchain.stat.exists or not xui_panel_privkey.stat.exists
+  block:
+    - name: Остановить x-ui перед standalone challenge
+      ansible.builtin.service:
+        name: "{{ xui_service_name }}"
+        state: stopped
+
+    - name: Выставить Let's Encrypt как default CA
+      ansible.builtin.command:
+        argv:
+          - "{{ xui_acme_sh_path }}"
+          - --set-default-ca
+          - --server
+          - letsencrypt
+          - --force
+      changed_when: false
+
+    - name: Выпустить сертификат для домена панели
+      ansible.builtin.command:
+        argv:
+          - "{{ xui_acme_sh_path }}"
+          - --issue
+          - -d
+          - "{{ xui_domain }}"
+          - --standalone
+          - --httpport
+          - "80"
+          - --force
+
+    - name: Установить сертификат в каталог 3x-ui
+      ansible.builtin.command:
+        argv:
+          - "{{ xui_acme_sh_path }}"
+          - --installcert
+          - -d
+          - "{{ xui_domain }}"
+          - --key-file
+          - "{{ xui_panel_cert_dir }}/privkey.pem"
+          - --fullchain-file
+          - "{{ xui_panel_cert_dir }}/fullchain.pem"
+          - --reloadcmd
+          - systemctl restart x-ui
+  always:
+    - name: Убедиться, что x-ui снова запущен
+      ansible.builtin.service:
+        name: "{{ xui_service_name }}"
+        state: started
+
+- name: Включить auto-upgrade для acme.sh
+  ansible.builtin.command:
+    argv:
+      - "{{ xui_acme_sh_path }}"
+      - --upgrade
+      - --auto-upgrade
+  changed_when: false
+  when: xui_acme_sh_path | length > 0
+
+- name: Задать безопасные права на сертификаты
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ xui_panel_cert_dir }}/privkey.pem", mode: "0600" }
+    - { path: "{{ xui_panel_cert_dir }}/fullchain.pem", mode: "0644" }
+
+- name: Подключить выпущенный сертификат к панели 3x-ui
+  ansible.builtin.command:
+    argv:
+      - "{{ xui_install_dir }}/x-ui"
+      - cert
+      - -webCert
+      - "{{ xui_panel_cert_dir }}/fullchain.pem"
+      - -webCertKey
+      - "{{ xui_panel_cert_dir }}/privkey.pem"
+  notify: Restart x-ui
+
+- name: Зафиксировать доменные runtime-настройки панели и subscription server
+  ansible.builtin.shell: |
+    set -euo pipefail
+    PG_USER="{{ xui_db_user }}"
+    PG_DB="{{ xui_db_name }}"
+    PG_HOST="{{ xui_db_host }}"
+    PG_PORT="{{ xui_db_port }}"
+    export PGPASSWORD="{{ xui_db_password }}"
+
+    changed=0
+
+    set_setting() {
+      local key="$1"
+      local value="$2"
+      local current
+      local count
+
+      count="$(psql -U "${PG_USER}" -d "${PG_DB}" -h "${PG_HOST}" -p "${PG_PORT}" -tA -c "SELECT COUNT(*) FROM settings WHERE key = '${key}';")"
+      current="$(psql -U "${PG_USER}" -d "${PG_DB}" -h "${PG_HOST}" -p "${PG_PORT}" -tA -c "SELECT COALESCE(value, '') FROM settings WHERE key = '${key}' LIMIT 1;")"
+
+      if [[ "${count}" != "1" || "${current}" != "${value}" ]]; then
+        psql -U "${PG_USER}" -d "${PG_DB}" -h "${PG_HOST}" -p "${PG_PORT}" -c "DELETE FROM settings WHERE key = '${key}'; INSERT INTO settings(key, value) VALUES('${key}', '${value}');"
+        echo "updated:${key}"
+        changed=1
+      fi
+    }
+
+    set_setting "webDomain" "{{ xui_panel_web_domain }}"
+    set_setting "subEnable" "true"
+    set_setting "subListen" "{{ xui_sub_listen_ip }}"
+    set_setting "subPort" "{{ xui_sub_port | string }}"
+    set_setting "subDomain" "{{ xui_domain }}"
+    set_setting "subCertFile" "{{ xui_panel_cert_dir }}/fullchain.pem"
+    set_setting "subKeyFile" "{{ xui_panel_cert_dir }}/privkey.pem"
+
+    if [[ "${changed}" -eq 0 ]]; then
+      echo "unchanged"
+    fi
+  args:
+    executable: /bin/bash
+  register: xui_runtime_domain_settings
+  changed_when: "'unchanged' not in xui_runtime_domain_settings.stdout"
+  notify: Restart x-ui
+
+- name: Создать каталог backup 3x-ui
+  ansible.builtin.file:
+    path: "{{ xui_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Установить backup-скрипт 3x-ui
+  ansible.builtin.template:
+    src: 3x-ui-backup.sh.j2
+    dest: /usr/local/sbin/3x-ui-backup.sh
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Установить server-side скрипты
+  ansible.builtin.import_tasks: update-script.yml
+
+- name: Установить systemd service для backup 3x-ui
+  ansible.builtin.template:
+    src: 3x-ui-backup.service.j2
+    dest: /etc/systemd/system/3x-ui-backup.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Установить systemd timer для backup 3x-ui
+  ansible.builtin.template:
+    src: 3x-ui-backup.timer.j2
+    dest: /etc/systemd/system/3x-ui-backup.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart 3x-ui backup timer
+
+- name: Синхронно применить handler-изменения до валидации
+  ansible.builtin.meta: flush_handlers
+
+- name: Сохранить operational note с доступом и решениями по безопасности
+  ansible.builtin.template:
+    src: 3x-ui-access.txt.j2
+    dest: /root/3x-ui-access.txt
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Проверить доступность панели на loopback через SSH-туннель
+  ansible.builtin.uri:
+    url: "{{ xui_panel_tunnel_url }}"
+    method: GET
+    validate_certs: false
+    return_content: false
+    status_code: [200, 302]
