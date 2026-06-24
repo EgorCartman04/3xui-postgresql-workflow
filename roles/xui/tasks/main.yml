@@ -174,21 +174,24 @@
 - name: "Диагностика: hex dump паролей и прямой psql тест с Ansible-кредами"
   ansible.builtin.shell: |
     set -euo pipefail
-    echo "=== Raw x-ui.env (первые 2 строки) ==="
-    head -2 /etc/default/x-ui
+    echo "=== DSN-строка (пароль скрыт) ==="
+    grep 'XUI_DB_DSN' /etc/default/x-ui | sed 's/password=[^ ]*/password=***REDACTED***/' || echo "NO_DSN_LINE"
     echo "=== Hex dump DSN-пароля ==="
     DSN_PASS="$(grep -oP 'password=\K[^\s]+' /etc/default/x-ui || echo 'NOT_FOUND')"
     printf 'DSN length: %s\n' "$(printf '%s' "$DSN_PASS" | wc -c)"
-    printf '%s' "$DSN_PASS" | xxd | head -5
+    printf '%s' "$DSN_PASS" | xxd | head -5 || true
     echo "=== Hex dump Ansible-пароля ==="
     printf 'ANSIBLE length: %s\n' '{{ xui_db_password | length }}'
-    printf '%s' '{{ xui_db_password }}' | xxd | head -5
-    echo "=== od -c Ansible-пароля ==="
-    printf '%s' '{{ xui_db_password }}' | od -c | head -5
-    echo "=== psql peer (postgres) проверка pg_authid ==="
-    sudo -u postgres psql -tAc "SELECT rolname, left(rolpassword,25) FROM pg_authid WHERE rolname='{{ xui_db_user }}';"
-    echo "=== psql TCP test с Ansible-кредами ==="
+    printf '%s' '{{ xui_db_password }}' | xxd | head -5 || true
+    echo "=== od -c Ansible-пароля (первые 64 байта) ==="
+    printf '%s' '{{ xui_db_password }}' | od -c | head -5 || true
+    echo "=== pg_authid (peer socket) ==="
+    sudo -u postgres psql -tAc "SELECT rolname, left(rolpassword,35) FROM pg_authid WHERE rolname='{{ xui_db_user }}';" || echo "PG_AUTHID_FAILED"
+    echo "=== ALTER USER через peer socket (повторно) ==="
+    sudo -u postgres psql -c "ALTER USER \"{{ xui_db_user }}\" WITH PASSWORD '{{ xui_db_password }}';" || echo "ALTER_FAILED"
+    echo "=== psql TCP test после ALTER ==="
     PGPASSWORD='{{ xui_db_password }}' psql -h '{{ xui_db_host }}' -p '{{ xui_db_port }}' -U '{{ xui_db_user }}' -d '{{ xui_db_name }}' -tAc "SELECT 'ANSIBLE_OK';" 2>&1 || echo "ANSIBLE_FAILED_rc=$?"
+    echo "DIAGNOSTIC_COMPLETE"
   args:
     executable: /bin/bash
   register: xui_auth_diag
