@@ -58,14 +58,7 @@
     psql -c "CREATE DATABASE \"{{ xui_db_name }}\" OWNER \"{{ xui_db_user }}\";"
   when: "'missing' in xui_db_exists.stdout"
 
-- name: Проверить pg_hba.conf на наличие записи xui
-  ansible.builtin.shell: |
-    set -euo pipefail
-    grep -q "{{ xui_db_user }}" /etc/postgresql/*/main/pg_hba.conf && echo "found" || echo "missing"
-  register: xui_pg_hba_entry
-  changed_when: false
-
-- name: Добавить локальный доступ для пользователя xui в pg_hba.conf
+- name: Настроить локальный доступ для пользователя xui в pg_hba.conf (scram-sha-256)
   ansible.builtin.shell: |
     set -euo pipefail
     hba_file="$(find /etc/postgresql -name pg_hba.conf -path "*/main/*" | head -n 1)"
@@ -73,11 +66,17 @@
       echo "ERROR: pg_hba.conf not found"
       exit 1
     fi
-    echo "# 3x-ui local access" >> "${hba_file}"
-    echo "local   {{ xui_db_name }}   {{ xui_db_user }}   md5" >> "${hba_file}"
-    echo "host    {{ xui_db_name }}   {{ xui_db_user }}   127.0.0.1/32   md5" >> "${hba_file}"
-    echo "host    {{ xui_db_name }}   {{ xui_db_user }}   ::1/128       md5" >> "${hba_file}"
-  when: "'missing' in xui_pg_hba_entry.stdout"
+    # Удалить любые ранее добавленные строки для xui (старые md5-записи и комментарии)
+    sed -i "/# 3x-ui local access/d; /^[[:space:]]*\(local\|host\)[[:space:]]\+{{ xui_db_name }}[[:space:]]\+{{ xui_db_user }}[[:space:]]/d" "${hba_file}"
+    # Добавить актуальные записи с scram-sha-256 (соответствует password_encryption по умолчанию в PG 14+)
+    {
+      echo "# 3x-ui local access"
+      echo "local   {{ xui_db_name }}   {{ xui_db_user }}   scram-sha-256"
+      echo "host    {{ xui_db_name }}   {{ xui_db_user }}   127.0.0.1/32   scram-sha-256"
+      echo "host    {{ xui_db_name }}   {{ xui_db_user }}   ::1/128       scram-sha-256"
+    } >> "${hba_file}"
+  args:
+    executable: /bin/bash
   notify: Restart postgresql
 
 - name: Сохранить учётные данные БД в /root/3x-ui-access.txt

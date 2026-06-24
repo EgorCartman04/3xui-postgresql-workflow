@@ -168,32 +168,10 @@
     state: stopped
   failed_when: false
 
-- name: Диагностика аутентификации PostgreSQL
-  block:
-    - name: Перезагрузить PostgreSQL после возможного ALTER USER
-      ansible.builtin.service:
-        name: postgresql
-        state: reloaded
-
-    - name: Показать password_encryption и формат пароля xui
-      become: true
-      become_user: postgres
-      ansible.builtin.shell: |
-        set -euo pipefail
-        echo "--- password_encryption ---"
-        psql -tAc "SHOW password_encryption;"
-        echo "--- rolpassword (первые 20 символов) ---"
-        psql -tAc "SELECT left(rolpassword, 20) FROM pg_authid WHERE rolname='{{ xui_db_user }}';"
-        echo "--- записи xui в pg_hba.conf ---"
-        grep -i "{{ xui_db_user }}" /etc/postgresql/*/main/pg_hba.conf || echo "(нет записей)"
-        echo "--- тест подключения теми же кредами, что в DSN ---"
-        PGPASSWORD='{{ xui_db_password }}' psql -h {{ xui_db_host }} -p {{ xui_db_port }} -U {{ xui_db_user }} -d {{ xui_db_name }} -tAc "SELECT 1 AS ok;" || echo "PSQL_CONNECT_FAILED rc=$?"
-      register: xui_pg_diag
-      changed_when: false
-
-    - name: Вывести диагностику
-      ansible.builtin.debug:
-        var: xui_pg_diag.stdout_lines
+- name: Перезагрузить PostgreSQL после возможного изменения pg_hba/пароля
+  ansible.builtin.service:
+    name: postgresql
+    state: reloaded
 
 - name: Выполнить миграции 3x-ui (создание схемы в PostgreSQL)
   ansible.builtin.command: "{{ xui_install_dir }}/x-ui migrate"
