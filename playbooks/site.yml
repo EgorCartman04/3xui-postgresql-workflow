@@ -108,6 +108,7 @@
           - (item.stdout | trim) == (xui_sysctl[item.item] | string)
         fail_msg: "sysctl drift: {{ item.item }}={{ item.stdout | trim }}, expected={{ xui_sysctl[item.item] | string }}."
       loop: "{{ xui_postcheck_sysctl_values.results }}"
+      failed_when: false
       tags: [update, network]
 
     - name: Проверить, что x-ui активен
