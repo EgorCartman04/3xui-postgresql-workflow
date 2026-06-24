@@ -1,5 +1,7 @@
 ---
-- name: Restart postgresql
+# pg_hba.conf и ALTER USER подхватываются через reload (не restart).
+# reload не разрывает активные сессии и безопасен для production.
+- name: Reload postgresql
   ansible.builtin.service:
     name: postgresql
-    state: restarted
+    state: reloaded

@@ -33,7 +33,10 @@
   register: xui_db_user_exists
   changed_when: false
 
-- name: Создать пользователя БД для x-ui
+# Создать пользователя (только если не существует), без ALTER USER здесь.
+# ALTER USER выполняется ПОСЛЕ переключения pg_hba на scram-sha-256,
+# чтобы пароль гарантированно захешировался в scram-sha-256, а не md5.
+- name: Создать пользователя БД для x-ui (если не существует)
   become: true
   become_user: postgres
   ansible.builtin.shell: |
@@ -41,16 +44,7 @@
     psql -c "CREATE USER \"{{ xui_db_user }}\" WITH PASSWORD '{{ xui_db_password }}';"
   when: "'missing' in xui_db_user_exists.stdout"
 
-- name: Синхронизировать пароль пользователя БД с секретом
-  become: true
-  become_user: postgres
-  ansible.builtin.shell: |
-    set -euo pipefail
-    psql -c "ALTER USER \"{{ xui_db_user }}\" WITH PASSWORD '{{ xui_db_password }}';"
-  when: "'exists' in xui_db_user_exists.stdout"
-  changed_when: true
-
-- name: Создать БД xui
+- name: Создать БД xui (если не существует)
   become: true
   become_user: postgres
   ansible.builtin.shell: |
@@ -58,6 +52,9 @@
     psql -c "CREATE DATABASE \"{{ xui_db_name }}\" OWNER \"{{ xui_db_user }}\";"
   when: "'missing' in xui_db_exists.stdout"
 
+# Сначала переключить pg_hba на scram-sha-256, чтобы последующий ALTER USER
+# захешировал пароль правильным методом (scram-sha-256, а не md5).
+# Порядок критичен: pg_hba → reload → ALTER USER → reload.
 - name: Настроить локальный доступ для пользователя xui в pg_hba.conf (scram-sha-256)
   ansible.builtin.shell: |
     set -euo pipefail
@@ -77,7 +74,26 @@
     } >> "${hba_file}"
   args:
     executable: /bin/bash
-  notify: Restart postgresql
+  notify: Reload postgresql
+
+# Синхронизировать handler-ы: гарантировать, что pg_hba перечитан ДО ALTER USER.
+- name: Применить изменения pg_hba перед синхронизацией пароля
+  ansible.builtin.meta: flush_handlers
+
+# ALTER USER выполняется ПОСЛЕ reload pg_hba → пароль хешируется в scram-sha-256.
+- name: Синхронизировать пароль пользователя БД с секретом (scram-safe)
+  become: true
+  become_user: postgres
+  ansible.builtin.shell: |
+    set -euo pipefail
+    psql -c "ALTER USER \"{{ xui_db_user }}\" WITH PASSWORD '{{ xui_db_password }}';"
+  when: "'exists' in xui_db_user_exists.stdout"
+  changed_when: true
+  notify: Reload postgresql
+
+# Гарантировать, что PostgreSQL перечитал новый пароль.
+- name: Применить изменения пароля перед миграцией
+  ansible.builtin.meta: flush_handlers
 
 - name: Сохранить учётные данные БД в /root/3x-ui-access.txt
   ansible.builtin.lineinfile:

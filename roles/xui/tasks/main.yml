@@ -168,37 +168,8 @@
     state: stopped
   failed_when: false
 
-- name: Перезагрузить PostgreSQL после возможного изменения pg_hba/пароля
-  ansible.builtin.service:
-    name: postgresql
-    state: reloaded
-
-- name: Диагностика DSN и прямое подключение как делает x-ui
-  ansible.builtin.shell: |
-    set -euo pipefail
-    echo "=== Содержимое /etc/default/x-ui ==="
-    cat /etc/default/x-ui
-    echo
-    echo "=== Прямой тест PGPASSWORD (как x-ui мигратор) ==="
-    source /etc/default/x-ui
-    echo "XUI_DB_TYPE=$XUI_DB_TYPE"
-    echo "XUI_DB_DSN=$XUI_DB_DSN"
-    PGPASSWORD="$(echo "$XUI_DB_DSN" | grep -oP 'password=\K[^ ]+')"
-    PGUSER="$(echo "$XUI_DB_DSN" | grep -oP 'user=\K[^ ]+')"
-    PGHOST="$(echo "$XUI_DB_DSN" | grep -oP 'host=\K[^ ]+')"
-    PGPORT="$(echo "$XUI_DB_DSN" | grep -oP 'port=\K[^ ]+')"
-    PGDATABASE="$(echo "$XUI_DB_DSN" | grep -oP 'dbname=\K[^ ]+')"
-    echo "Извлечённые креды: host=$PGHOST port=$PGPORT user=$PGUSER db=$PGDATABASE"
-    echo "Длина пароля: ${#PGPASSWORD}"
-    psql "host=$PGHOST port=$PGPORT user=$PGUSER password=$PGPASSWORD dbname=$PGDATABASE" -tAc "SELECT 1;" 2>&1 || echo "FAIL rc=$?"
-  args:
-    executable: /bin/bash
-  register: xui_dsn_diag
-  changed_when: false
-
-- name: Вывести диагностику DSN
-  ansible.builtin.debug:
-    var: xui_dsn_diag.stdout_lines
+# pg_hba, пароль и reload PostgreSQL уже обработаны ролью postgresql
+# с синхронными flush_handlers (гарантированный порядок: pg_hba → reload → ALTER USER → reload).
 
 - name: Выполнить миграции 3x-ui (создание схемы в PostgreSQL)
   ansible.builtin.command: "{{ xui_install_dir }}/x-ui migrate"
