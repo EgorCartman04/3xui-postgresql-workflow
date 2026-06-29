@@ -11,7 +11,7 @@ controller_ssh_public_key: "{{ lookup('file', controller_ssh_public_key_file, er
 
 xui_server_ip: "2.27.23.76"
 xui_domain: "power.randomain.space"
-xui_version: "v3.4.0"
+xui_version: "v3.4.1"
 xui_acme_sh_version: "3.1.3"
 xui_force_downgrade: false
 xui_install_dir: "/usr/local/x-ui"

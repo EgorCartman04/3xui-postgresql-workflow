@@ -1,6 +1,6 @@
 # Схема базы данных 3x-ui (PostgreSQL)
 
-Версия: v3.4.0 | СУБД: PostgreSQL | ORM: GORM
+Версия: v3.4.1 | СУБД: PostgreSQL | ORM: GORM
 
 ---
 
