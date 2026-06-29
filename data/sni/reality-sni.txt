@@ -9,3 +9,4 @@ www.samsung.com:443 | www.samsung.com,samsung.com
 www.google.com:443 | www.google.com,google.com
 www.max.ru:443 | www.max.ru,max.ru
 video.mail.ru:443 | video.mail.ru,www.mail.ru
+www.rutube.ru:443 | www.rutube.ru,rutube.ru
