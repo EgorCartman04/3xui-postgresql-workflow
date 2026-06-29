@@ -60,6 +60,7 @@
     executable: /bin/bash
   changed_when: false
   failed_when: false
+  no_log: true
 
 - name: Проверить наличие runtime-артефактов менеджера для rollout backup
   ansible.builtin.stat:
@@ -135,11 +136,12 @@
 - name: Обновить путь runtime override fail2ban в существующем config.json
   ansible.builtin.copy:
     dest: "{{ xui_manager_config_path }}"
-    content: "{{ (xui_manager_runtime_config_raw.content | b64decode | from_json | combine({'fail2ban_override_path': xui_manager_fail2ban_override_path, 'slots': {'ports': xui_manager_slot_ports, 'auto_provision': xui_manager_slot_auto_provision}, 'tls': {'enabled': true, 'cert_path': xui_panel_cert_dir ~ '/fullchain.pem', 'key_path': xui_panel_cert_dir ~ '/privkey.pem'}, 'auth': {'realm': '3x-ui SNI Manager', 'source': 'x-ui-users-db'}}, recursive=True)) | to_nice_json }}\n"
+    content: "{{ (xui_manager_runtime_config_raw.content | b64decode | from_json | combine({'fail2ban_override_path': xui_manager_fail2ban_override_path, 'slots': {'ports': xui_manager_slot_ports, 'auto_provision': xui_manager_slot_auto_provision}, 'tls': {'enabled': true, 'cert_path': xui_panel_cert_dir ~ '/fullchain.pem', 'key_path': xui_panel_cert_dir ~ '/privkey.pem'}, 'auth': {'realm': '3x-ui SNI Manager', 'source': 'x-ui-users-db'}, 'xui_db_type': xui_db_type, 'xui_db_host': xui_db_host, 'xui_db_port': xui_db_port, 'xui_db_name': xui_db_name, 'xui_db_user': xui_db_user, 'xui_db_password': xui_db_password}, recursive=True)) | to_nice_json }}\n"
     owner: root
     group: root
     mode: "0640"
   when: xui_manager_config_stat.stat.exists
+  no_log: true
 
 - name: Удалить legacy runtime override fail2ban после миграции
   ansible.builtin.file:

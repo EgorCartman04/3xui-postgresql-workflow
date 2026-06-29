@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import re
+import sqlite3
 import ssl
 import subprocess
 import sys
@@ -192,8 +193,11 @@ def find_entry_index(entries, candidate):
     return -1
 
 
-def run_command(args, check=True, env=None):
-    completed = subprocess.run(args, capture_output=True, text=True, env=env)
+def run_command(args, check=True, env=None, timeout=30):
+    try:
+        completed = subprocess.run(args, capture_output=True, text=True, env=env, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"command timed out after {timeout}s: {args}")
     if check and completed.returncode != 0:
         raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "command failed")
     return completed

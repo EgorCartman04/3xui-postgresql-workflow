@@ -9,9 +9,10 @@ ansible_ssh_private_key_file: "{{ controller_ssh_private_key_file }}"
 controller_ssh_public_key_file: "{{ lookup('env', 'ANSIBLE_DEPLOY_KEY_PUBLIC_FILE') | default(controller_ssh_private_key_file + '.pub', true) }}"
 controller_ssh_public_key: "{{ lookup('file', controller_ssh_public_key_file, errors='ignore') | trim }}"
 
-xui_server_ip: "2.26.230.90"
-xui_domain: "adv.randomain.space"
+xui_server_ip: "2.27.23.76"
+xui_domain: "power.randomain.space"
 xui_version: "v3.4.0"
+xui_acme_sh_version: "3.1.3"
 xui_force_downgrade: false
 xui_install_dir: "/usr/local/x-ui"
 xui_service_name: "x-ui"
