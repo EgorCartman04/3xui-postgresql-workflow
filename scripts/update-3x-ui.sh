@@ -12,11 +12,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
-REMOTE_HOST="${XUI_TUNNEL_HOST:-2.26.230.90}"
+REMOTE_HOST="${XUI_TUNNEL_HOST:-2.27.23.76}"
 REMOTE_USER="${XUI_TUNNEL_USER:-root}"
 SSH_CONNECT_TIMEOUT="${XUI_TUNNEL_CONNECT_TIMEOUT:-8}"
 SERVICE_NAME="${XUI_SERVICE_NAME:-x-ui}"
-CERT_DOMAIN="${XUI_DOMAIN:-adv.randomain.space}"
+CERT_DOMAIN="${XUI_DOMAIN:-power.randomain.space}"
 BACKUP_PREFIX="${XUI_UPDATE_BACKUP_PREFIX:-manual-pre-update-3x-ui}"
 
 DEFAULT_KEY_FILE="${REPO_ROOT}/.secrets/ssh/ansible_deploy_key"
@@ -85,13 +85,13 @@ print_help() {
     Не задавать интерактивное подтверждение перед применением
 
 Переменные окружения:
-  XUI_TUNNEL_HOST              SSH-хост сервера (по умолчанию: 2.26.230.90)
+  XUI_TUNNEL_HOST              SSH-хост сервера (по умолчанию: 2.27.23.76)
   XUI_TUNNEL_USER              SSH-пользователь (по умолчанию: root)
   XUI_TUNNEL_CONNECT_TIMEOUT   Таймаут подключения в секундах (по умолчанию: 8)
   XUI_TUNNEL_KEY_FILE          Явный путь к приватному SSH-ключу
   ANSIBLE_DEPLOY_KEY_FILE      Fallback-путь к ключу
   XUI_SERVICE_NAME             Имя systemd unit (по умолчанию: x-ui)
-  XUI_DOMAIN                   Домен сертификатов для backup (по умолчанию: adv.randomain.space)
+  XUI_DOMAIN                   Домен сертификатов для backup (по умолчанию: power.randomain.space)
   XUI_UPDATE_BACKUP_PREFIX     Префикс имени backup-файла на сервере
 EOF
 }

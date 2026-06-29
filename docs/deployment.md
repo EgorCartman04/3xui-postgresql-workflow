@@ -16,7 +16,7 @@
 
 ### Первичная установка (full)
 
-1. Убедиться, что DNS `adv.randomain.space` указывает на `2.26.230.90`
+1. Убедиться, что DNS `power.randomain.space` указывает на `2.27.23.76`
 2. Запустить workflow в режиме `full`
 3. Дождаться успешного завершения всех шагов
 
@@ -45,7 +45,7 @@
 ### Ручное подключение к БД
 
 ```bash
-ssh -i ./.secrets/ssh/ansible_deploy_key root@2.26.230.90
+ssh -i ./.secrets/ssh/ansible_deploy_key root@2.27.23.76
 sudo -u postgres psql -d xui
 ```
 
@@ -54,7 +54,7 @@ sudo -u postgres psql -d xui
 1. Запустить workflow с указанием предыдущей версии 3x-ui в поле `xui_version`
 2. Или восстановить из backup:
    ```bash
-   ssh -i ./.secrets/ssh/ansible_deploy_key root@2.26.230.90
+   ssh -i ./.secrets/ssh/ansible_deploy_key root@2.27.23.76
    ls /var/backups/3x-ui/
    # Восстановить нужный архив вручную
    ```

@@ -2,8 +2,8 @@
 
 Ansible-пайплайн для деплоя 3x-ui с PostgreSQL и fail2ban на production-сервере.
 
-- Домен: `adv.randomain.space`
-- IP: `2.26.230.90`
+- Домен: `power.randomain.space`
+- IP: `2.27.23.76`
 - СУБД: PostgreSQL (вместо SQLite)
 - CI/CD: GitHub Actions (manual workflow_dispatch)
 
@@ -40,7 +40,7 @@ ansible-playbook --syntax-check playbooks/site.yml
 ## SSH-подключение к серверу
 
 ```bash
-ssh -i ./.secrets/ssh/ansible_deploy_key root@2.26.230.90
+ssh -i ./.secrets/ssh/ansible_deploy_key root@2.27.23.76
 ```
 
 Системные таймауты:
@@ -50,7 +50,7 @@ ssh -i ./.secrets/ssh/ansible_deploy_key \
     -o ConnectTimeout=8 \
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
-    root@2.26.230.90
+    root@2.27.23.76
 ```
 
 ## Скрипты
@@ -75,9 +75,9 @@ ssh -i ./.secrets/ssh/ansible_deploy_key \
 ### Переключение режима доступа панели (server-side)
 
 ```bash
-ssh -i ./.secrets/ssh/ansible_deploy_key root@2.26.230.90 "/usr/local/sbin/3xui-panel-access-switch.sh"
-ssh -i ./.secrets/ssh/ansible_deploy_key root@2.26.230.90 "/usr/local/sbin/3xui-panel-access-switch.sh --mode tunnel"
-ssh -i ./.secrets/ssh/ansible_deploy_key root@2.26.230.90 "/usr/local/sbin/3xui-panel-access-switch.sh --mode direct"
+ssh -i ./.secrets/ssh/ansible_deploy_key root@2.27.23.76 "/usr/local/sbin/3xui-panel-access-switch.sh"
+ssh -i ./.secrets/ssh/ansible_deploy_key root@2.27.23.76 "/usr/local/sbin/3xui-panel-access-switch.sh --mode tunnel"
+ssh -i ./.secrets/ssh/ansible_deploy_key root@2.27.23.76 "/usr/local/sbin/3xui-panel-access-switch.sh --mode direct"
 ```
 
 ## Архитектура
