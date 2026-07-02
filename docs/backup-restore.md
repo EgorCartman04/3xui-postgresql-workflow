@@ -11,7 +11,7 @@
 | `scripts/backup-full.sh` | Собирает все stateful-данные с сервера, шифрует GPG, сохраняет локально |
 | `scripts/restore-full.sh` | Восстанавливает сервер из бэкапа (DR на новый или переустановленный сервер) |
 
-Архивы сохраняются в `vpn-serverFullBbackups/` (в `.gitignore`, **не коммитить**).
+Архивы сохраняются в `vpnServerFullBackups/` (в `.gitignore`, **не коммитить**).
 
 ## Что входит в полный бэкап
 
@@ -42,7 +42,7 @@
 Архив содержит **критичные секреты**: дамп всех VPN-пользователей с Reality-ключами, пароль PostgreSQL.
 
 - **Шифрование**: по умолчанию архив шифруется симметричным GPG (AES-256).
-- **Каталог в .gitignore**: `vpn-serverFullBbackups/` никогда не попадёт в git.
+- **Каталог в .gitignore**: `vpnServerFullBackups/` никогда не попадёт в git.
 - **Пароль БД не нужен локально**: backup-скрипт извлекает его с сервера из `/etc/default/xui`.
 - **Пароль GPG**: задаётся через `XUI_BACKUP_GPG_PASSPHRASE` или вводится интерактивно.
 
@@ -67,16 +67,16 @@ XUI_BACKUP_GPG_PASSPHRASE="секрет" ./scripts/backup-full.sh
 ./scripts/backup-full.sh --no-encrypt
 ```
 
-**Результат**: `vpn-serverFullBbackups/3xui-full-<timestamp>.tar.gz.gpg` + sidecar `.meta.json` (без секретов, для listing).
+**Результат**: `vpnServerFullBackups/3xui-full-<timestamp>.tar.gz.gpg` + sidecar `.meta.json` (без секретов, для listing).
 
 ### Просмотр содержимого архива (без распаковки на сервер)
 
 ```bash
 # Показать манифест
-./scripts/restore-full.sh vpn-serverFullBbackups/3xui-full-20260702-120000.tar.gz.gpg --show-manifest
+./scripts/restore-full.sh vpnServerFullBackups/3xui-full-20260702-120000.tar.gz.gpg --show-manifest
 
 # Список файлов внутри (после ввода пароля)
-XUI_BACKUP_GPG_PASSPHRASE="..." gpg -d vpn-serverFullBbackups/3xui-full-*.tar.gz.gpg | tar -tzf -
+XUI_BACKUP_GPG_PASSPHRASE="..." gpg -d vpnServerFullBackups/3xui-full-*.tar.gz.gpg | tar -tzf -
 ```
 
 ## Восстановление (Disaster Recovery)
@@ -91,7 +91,7 @@ XUI_ADMIN_USERNAME=... XUI_ADMIN_PASSWORD=... \
   ansible-playbook playbooks/site.yml
 
 # 2. Восстанови данные из бэкапа
-./scripts/restore-full.sh vpn-serverFullBbackups/3xui-full-<timestamp>.tar.gz.gpg
+./scripts/restore-full.sh vpnServerFullBackups/3xui-full-<timestamp>.tar.gz.gpg
 
 # 3. Проверь панель
 ./scripts/tunnel.sh status
@@ -113,7 +113,7 @@ XUI_ADMIN_USERNAME=... XUI_ADMIN_PASSWORD=... \
   ansible-playbook playbooks/site.yml
 
 # 4. Восстанови данные, указав новый IP
-./scripts/restore-full.sh vpn-serverFullBbackups/3xui-full-<timestamp>.tar.gz.gpg \
+./scripts/restore-full.sh vpnServerFullBackups/3xui-full-<timestamp>.tar.gz.gpg \
   --host "НОВЫЙ_IP"
 
 # Сертификаты TLS и acme.sh восстанавливать из бэкапа не нужно —

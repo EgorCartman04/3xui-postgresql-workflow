@@ -17,7 +17,7 @@
 # ПЕРЕД восстановлением.
 #
 # Использование:
-#   ./scripts/restore-full.sh vpn-serverFullBbackups/3xui-full-<ts>.tar.gz.gpg
+#   ./scripts/restore-full.sh vpnServerFullBackups/3xui-full-<ts>.tar.gz.gpg
 #   ./scripts/restore-full.sh <archive> --host NEW_IP
 #   ./scripts/restore-full.sh <archive> --yes          — без подтверждения
 #   XUI_BACKUP_GPG_PASSPHRASE=... ./scripts/restore-full.sh <archive>

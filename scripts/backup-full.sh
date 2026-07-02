@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Полный бэкап VPN-сервера (3x-ui + SNI Manager + PostgreSQL) в локальную репу.
 #
-# Архив шифруется симметричным GPG-шифром и сохраняется в vpn-serverFullBbackups/.
-# Каталог vpn-serverFullBbackups/ в .gitignore — НИКОГДА не коммить его.
+# Архив шифруется симметричным GPG-шифром и сохраняется в vpnServerFullBackups/.
+# Каталог vpnServerFullBackups/ в .gitignore — НИКОГДА не коммить его.
 #
 # Что попадает в бэкап:
 #   - pg_dump БД xui (custom format) — пользователи, inbound'ы, Reality-ключи
@@ -29,7 +29,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 INVENTORY_FILE="${REPO_ROOT}/inventories/prod/group_vars/all.yml"
-BACKUP_DIR="${REPO_ROOT}/vpn-serverFullBbackups"
+BACKUP_DIR="${REPO_ROOT}/vpnServerFullBackups"
 DEFAULT_KEEP=14
 
 CLI_KEEP=""
