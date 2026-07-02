@@ -72,6 +72,24 @@ ssh -i ./.secrets/ssh/ansible_deploy_key \
 ./scripts/update-3x-ui.sh --version 3.2.0 --yes
 ```
 
+### Полный бэкап и восстановление (DR)
+
+Подробно: [docs/backup-restore.md](docs/backup-restore.md).
+
+```bash
+# Создать полный бэкап (3x-ui + SNI Manager + PostgreSQL) в vpn-serverFullBbackups/
+./scripts/backup-full.sh
+./scripts/backup-full.sh --keep 10          # хранить последние 10
+./scripts/backup-full.sh --list             # показать бэкапы
+
+# Восстановить из бэкапа (поверх развёрнутого через Ansible сервера)
+./scripts/restore-full.sh vpn-serverFullBbackups/3xui-full-<timestamp>.tar.gz.gpg
+./scripts/restore-full.sh <archive> --host NEW_IP   # на новый сервер
+./scripts/restore-full.sh <archive> --show-manifest # посмотреть содержимое
+```
+
+Архивы шифруются GPG (AES-256). Каталог `vpn-serverFullBbackups/` в `.gitignore`.
+
 ### Переключение режима доступа панели (server-side)
 
 ```bash
@@ -130,6 +148,9 @@ ssh -i ./.secrets/ssh/ansible_deploy_key root@2.27.23.76 "/usr/local/sbin/3xui-p
 ├── scripts/
 │   ├── tunnel.sh
 │   ├── check-dns.sh
-│   └── update-3x-ui.sh
+│   ├── update-3x-ui.sh
+│   ├── backup-full.sh                   # Полный бэкап сервера (GPG-шифрование)
+│   └── restore-full.sh                  # Восстановление из бэкапа (DR)
+├── vpn-serverFullBbackups/              # Архивы бэкапов (gitignored, НЕ коммитить)
 └── data/sni/reality-sni.txt
 ```

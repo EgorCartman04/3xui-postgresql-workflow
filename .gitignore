@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 .DS_Store
 data/creds
+
+# Полные бэкапы VPN-сервера (содержат секреты — НИКОГДА не коммитить)
+vpn-serverFullBbackups/
