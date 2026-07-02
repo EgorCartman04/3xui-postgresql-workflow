@@ -560,41 +560,53 @@ remove_ufw_sni_direct_rule() {
 
 apply_mode_tunnel() {
     backup_state
-    apply_listen_ip "${TUNNEL_LISTEN_IP}"
-    restart_and_verify_service
-    remove_ufw_direct_rule
+
+    # Сначала настраиваем SNI Manager — его перезапуск не рвёт SSH-туннель.
     apply_sni_manager_listen_host "${SNI_MANAGER_TUNNEL_LISTEN_IP}"
     restart_and_verify_sni_manager_service
     remove_ufw_sni_direct_rule
+
+    echo
+    echo "Режим успешно применен: Tunnel mode"
+    echo "SNI Manager слушает: ${SNI_MANAGER_TUNNEL_LISTEN_IP}:${EFFECTIVE_SNI_MANAGER_PORT}"
+    echo "Для доступа с локальной машины используй: ./scripts/tunnel.sh start"
+
+    # Рестарт x-ui — потенциально разрывает SSH RemoteForward.
+    apply_listen_ip "${TUNNEL_LISTEN_IP}"
+    restart_and_verify_service
+    remove_ufw_direct_rule
     healthcheck_local_panel
     healthcheck_local_sni_manager
     persist_mode_state "tunnel"
 
-    echo
-    echo "Режим успешно применен: Tunnel mode"
     echo "Панель слушает: ${TUNNEL_LISTEN_IP}:${EFFECTIVE_PANEL_PORT}"
-    echo "SNI Manager слушает: ${SNI_MANAGER_TUNNEL_LISTEN_IP}:${EFFECTIVE_SNI_MANAGER_PORT}"
-    echo "Для доступа с локальной машины используй: ./scripts/tunnel.sh start"
 }
 
 apply_mode_direct() {
     backup_state
-    apply_listen_ip "${DIRECT_LISTEN_IP}"
-    restart_and_verify_service
-    ensure_ufw_direct_rule
+
+    # Сначала настраиваем SNI Manager — его перезапуск не рвёт SSH-туннель.
     apply_sni_manager_listen_host "${SNI_MANAGER_DIRECT_LISTEN_IP}"
     restart_and_verify_sni_manager_service
     ensure_ufw_sni_direct_rule
+
+    # Выводим ссылки до перезапуска x-ui, потому что рестарт панели
+    # может разорвать SSH-сессию, проброшенную через её порт.
+    echo
+    echo "Режим успешно применен: Direct mode"
+    echo "SNI Manager слушает: ${SNI_MANAGER_DIRECT_LISTEN_IP}:${EFFECTIVE_SNI_MANAGER_PORT}"
+    echo "Ссылка SNI Manager (direct): $(sni_manager_url)"
+
+    # Рестарт x-ui — потенциально разрывает SSH RemoteForward.
+    apply_listen_ip "${DIRECT_LISTEN_IP}"
+    restart_and_verify_service
+    ensure_ufw_direct_rule
     healthcheck_local_panel
     healthcheck_local_sni_manager
     persist_mode_state "direct"
 
-    echo
-    echo "Режим успешно применен: Direct mode"
     echo "Панель слушает: ${DIRECT_LISTEN_IP}:${EFFECTIVE_PANEL_PORT}"
     echo "Ссылка панели (direct): $(panel_url)"
-    echo "SNI Manager слушает: ${SNI_MANAGER_DIRECT_LISTEN_IP}:${EFFECTIVE_SNI_MANAGER_PORT}"
-    echo "Ссылка SNI Manager (direct): $(sni_manager_url)"
 }
 
 choose_mode_interactively() {
